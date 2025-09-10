@@ -1,0 +1,14 @@
+pandas
+akshare
+backtrader
+chinese_calendar
+statsmodels
+alphalens-reloaded
+loguru==0.7.3
+pandas==2.2.3
+pre-commit==4.2.0
+pydantic==2.11.3
+pyecharts==2.0.8
+PyYAML==6.0.2
+streamlit==1.44.1
+streamlit_echarts==0.4.0
