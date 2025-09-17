@@ -1,14 +1,15 @@
-# 通用股票回测系统
+# 股票回测系统
 
 ## 项目概述
 
-本项目是一个基于Streamlit的通用股票回测系统，支持多种策略、多数据源、灵活配置，并提供丰富的可视化分析功能。
+这是一个完整的股票回测系统，基于Backtrader和Streamlit构建，支持多种交易策略、实时数据获取和丰富的分析功能。
 
 ## 功能特性
 
 ### 🎯 核心功能
 - **多策略支持**: 加权TopN、等权重、动量策略
 - **多基准对比**: 支持沪深300、上证指数、深证成指、创业板指、中证500、上证50
+- **实时数据**: 集成AKShare获取实时股票和指数数据
 - **灵活配置**: 参数可配置，支持配置文件管理
 - **丰富可视化**: 多种图表展示方式
 
@@ -18,50 +19,61 @@
 - **风险分析**: 回撤分析、VaR、CVaR、夏普比率
 - **持仓分析**: 每日持仓详情、权重分布
 - **交易记录**: 详细交易历史
+- **Alpha分析**: 集成Alphalens进行因子分析
 
 ### ⚙️ 技术特性
+- **Backtrader引擎**: 基于成熟的Backtrader回测框架
 - **配置分离**: 系统配置与策略配置分离
 - **结果缓存**: 支持结果缓存，提高重复运行效率
 - **参数化缓存**: 缓存键包含所有参数，确保参数变化时重新计算
-- **真实数据验证**: 使用现有CSV文件进行验证
+- **真实数据验证**: 使用AKShare实时数据
 
 ## 文件结构
 
 ```
-/mnt/workspace/btcode/
-├── zhangting_strategy_streamlit.py    # 原始版本（未修改）
-├── generic_backtesting_system.py      # 通用版本（基础功能）
-├── final_working_system.py           # 工作版本（固定数据目录）
-├── enhanced_final_system.py          # 增强版本（完整功能）
-├── config.py                         # 配置文件
-├── test_*.py                         # 测试文件
-└── README.md                         # 说明文档
+/mnt/workspace/clean_stock_backtest/
+├── integrated_backtesting_system.py    # 集成版回测系统（主文件，2113行）
+├── backtrader_base_strategy.py         # Backtrader基础策略（1098行）
+├── data.py                             # 数据处理模块（53173行）
+├── config.py                           # 配置文件（10495行）
+├── requirements.txt                    # 依赖包列表
+├── all_a_stocks.csv                    # 股票数据文件
+├── start.sh                           # 启动脚本
+├── data/                               # 数据目录
+│   ├── *.csv                         # 股票数据CSV文件
+│   ├── best_config_*.json            # 最优配置缓存
+│   ├── *predicted_tomorrow_result.json # 预测结果
+│   └── selected_stocks_*_result.json  # 选股结果
+├── logs/                               # 日志目录
+├── __pycache__/                        # Python缓存
+└── README.md                           # 说明文档
 ```
 
-## 数据格式
+## 数据源
 
-CSV文件必须包含以下列：
-- `date`: 日期 (YYYY-MM-DD格式)
-- `code`: 股票代码 (6位数字)
-- `weight`: 权重 (可选，用于加权策略)
+- **AKShare**: 实时获取股票和指数数据
+- **本地CSV**: 支持导入本地股票数据文件
+- **缓存机制**: 自动缓存计算结果提高效率
 
 ## 使用方法
 
-### 1. 准备数据
-将CSV文件放入 `/mnt/workspace/btcode/data/` 目录
+### 1. 安装依赖
+```bash
+pip install -r requirements.txt
+```
 
 ### 2. 运行系统
 ```bash
-# 运行增强版本（推荐）
-streamlit run enhanced_final_system.py
+# 方法一：使用启动脚本（推荐）
+./start.sh
 
-# 或者运行基础版本
-streamlit run final_working_system.py
+# 方法二：直接运行
+streamlit run integrated_backtesting_system.py
 ```
 
 ### 3. 配置参数
-- 选择回测文件
-- 设置初始资金
+- 选择回测文件或使用实时数据
+- 设置初始资金和交易费用
 - 选择策略和参数
 - 选择基准指数
 - 选择分析内容
@@ -70,6 +82,7 @@ streamlit run final_working_system.py
 - 综合摘要
 - 详细分析（多标签页）
 - 丰富的可视化图表
+- Alpha因子分析
 
 ## 策略说明
 
@@ -105,21 +118,15 @@ streamlit run final_working_system.py
 - 月度胜率
 - 连续盈利/亏损
 
-## 测试结果
+## 技术栈
 
-### 基础测试
-- ✅ 配置系统测试通过
-- ✅ 数据处理测试通过
-- ✅ 策略逻辑测试通过
-- ✅ 性能指标计算测试通过
-- ✅ 可视化功能测试通过
-- ✅ 文件系统测试通过
-
-### 真实数据测试
-- ✅ 13个有效CSV文件识别
-- ✅ 数据格式验证通过
-- ✅ 数据预处理流程测试通过
-- ✅ 样本数据分析测试通过
+- **Python 3.7+**: 主要编程语言
+- **Backtrader**: 回测引擎
+- **Streamlit**: Web界面
+- **Pandas/NumPy**: 数据处理
+- **Matplotlib/Seaborn**: 数据可视化
+- **AKShare**: 金融数据获取
+- **Alphalens**: 因子分析
 
 ## 系统特点
 
@@ -127,23 +134,21 @@ streamlit run final_working_system.py
 2. **可扩展性**: 易于添加新策略和分析器
 3. **用户友好**: 直观的Streamlit界面
 4. **功能完整**: 从数据加载到结果展示全流程
-5. **真实验证**: 使用现有数据进行验证
+5. **实时数据**: 支持AKShare实时数据获取
+6. **专业分析**: 集成Alphalens因子分析
 
 ## 运行环境
 
 - Python 3.7+
-- Streamlit
-- Pandas
-- NumPy
-- Matplotlib
-- Seaborn
+- 参见requirements.txt完整依赖列表
 
 ## 注意事项
 
-1. 当前版本使用模拟回测引擎，真实环境中需要连接实际的回测系统
+1. 需要网络连接以获取AKShare实时数据
 2. 数据文件需要符合指定格式
 3. 缓存功能默认开启，可通过参数关闭
-4. 中文显示可能需要安装中文字体
+4. 首次运行需要下载数据，可能较慢
+5. 启动脚本包含OSS环境变量配置，可根据需要修改
 
 ## 扩展开发
 
@@ -151,14 +156,12 @@ streamlit run final_working_system.py
 1. 继承 `BaseStrategy` 类添加新策略
 2. 扩展配置文件添加新参数
 3. 添加新的分析器和指标
-4. 连接真实的回测引擎
-
-## 联系信息
-
-如有问题或建议，请通过以下方式联系：
-- 提交Issue
-- 发送邮件
+4. 集成其他数据源（Tushare、Baostock等）
+5. 添加机器学习模型
+6. 支持更多技术指标和因子
+7. 添加风险控制模块
+8. 集成实时交易接口
 
 ---
 
-**🎉 系统已完成并通过全面测试！**
+**🎉 系统功能完整，支持实时数据回测和专业分析！**
