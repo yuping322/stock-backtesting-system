@@ -1729,7 +1729,7 @@ def create_enhanced_streamlit_app():
                                 complete_holdings_df = pd.DataFrame(all_holdings_data)
                                 
                                 # 按日期和权重排序
-                                complete_holdings_df = complete_holdings_df.sort_values(['Date', 'Weight (%)'], ascending=[True, False])
+                                #complete_holdings_df = complete_holdings_df.sort_values(['Date', 'Weight (%)'], ascending=[True, False])
                                 
                                 st.write("**Complete Daily Holdings History:**")
                                 
@@ -1843,8 +1843,14 @@ def create_enhanced_streamlit_app():
                                     else:
                                         display_matrix = weight_matrix
                                     
-                                    sns.heatmap(display_matrix.T, annot=False, cmap='Blues', 
+                                    if display_matrix.size > 0:
+                                        sns.heatmap(display_matrix.T, annot=False, cmap='Blues', 
                                               cbar_kws={'label': 'Weight (%)'}, ax=ax2)
+                                    else:
+                                        st.warning("当前没有持仓数据，无法绘制热力图")
+
+                                    # sns.heatmap(display_matrix.T, annot=False, cmap='Blues', 
+                                    #           cbar_kws={'label': 'Weight (%)'}, ax=ax2)
                                     ax2.set_title('Position Weight Heatmap Over Time')
                                     ax2.set_xlabel('Date')
                                     ax2.set_ylabel('Stock Code')

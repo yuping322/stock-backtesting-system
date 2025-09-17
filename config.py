@@ -191,8 +191,8 @@ class SystemConfig:
     slippage_rate: float = 0.0
     
     # 数据参数
-    data_dir: str = "/mnt/workspace/btcode/data"  # 固定数据目录
-    result_cache_dir: str = "/mnt/workspace/btcode/results"
+    data_dir: str = "./data"  # 固定数据目录
+    result_cache_dir: str = "./results"
     
     # 回测参数
     start_date: Optional[str] = None
