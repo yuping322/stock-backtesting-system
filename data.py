@@ -1,98 +1,217 @@
 from __future__ import annotations
-import pandas as pd
+
+import datetime as dt
+from datetime import date as dt_date, datetime as dt_datetime
+import io
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Union, Literal, TypedDict
+
 import backtrader as bt
-from typing import Union, List, Dict
-
-from io import BytesIO
-from typing import List, Union
 import pandas as pd
 import requests
-import pandas as pd
-import os
-from datetime import datetime, timedelta
-from typing import List, Optional, Union
-import glob
-import os
-import pandas as pd
-import oss2
-from typing import List, Optional
-import io
-import requests
-import pandas as pd
-from typing import Union, List
-import pandas as pd
-from typing import List, Optional
-import alphalens
-from alphalens.utils import get_clean_factor_and_forward_returns
-import logging
-import os
-import pandas as pd
-import akshare as ak
-import alphalens
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from alphalens.performance import mean_information_coefficient, factor_returns, mean_return_by_quantile
-import json
-import json, datetime, logging
-import os
-import io
-import pandas as pd
-from datetime import datetime
-from typing import List, Optional
-from io import BytesIO
-from typing import List, Union
-import pandas as pd
-import requests
-import pandas as pd
-import os
-from datetime import datetime, timedelta
-from typing import List, Optional, Union
-import glob
-import os
-import pandas as pd
-import oss2
-from typing import List, Optional
-import io
-import requests
-import pandas as pd
-from typing import Union, List
-import pandas as pd
-from typing import List, Optional
-import alphalens
-from alphalens.utils import get_clean_factor_and_forward_returns
-import logging
-import os
-import pandas as pd
-import akshare as ak
-import alphalens
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-from alphalens.performance import mean_information_coefficient, factor_returns, mean_return_by_quantile
-import json
-import re
-import datetime as dt
-from typing import Union, List
-import pandas as pd
-import oss2   # pip install oss2 或者 boto3
-from typing import List, Optional
-import pandas as pd
-import re
-import datetime as dt
-from typing import Union, List, Dict
-import pandas as pd
-import oss2
-import datetime as dt
-import chinese_calendar as calendar
-from typing import List
-
-
-auth = oss2.Auth(os.getenv("OSS_ACCESS_KEY_ID"), os.getenv("OSS_ACCESS_KEY_SECRET"))
-
-bucket = oss2.Bucket(
-    auth,
-    "https://oss-cn-hangzhou.aliyuncs.com",  # 替换成你的 endpoint
-    "test123432"                       # 替换成你的 bucket
+from alphalens.performance import (
+    factor_returns,
+    mean_information_coefficient,
+    mean_return_by_quantile,
 )
+from alphalens.utils import get_clean_factor_and_forward_returns
+import oss2
+from types import SimpleNamespace
+
+calendar = None
+try:
+    import chinese_calendar as calendar
+    CALENDAR_AVAILABLE = True
+except ImportError:
+    CALENDAR_AVAILABLE = False
+    calendar = SimpleNamespace(
+        is_workday=lambda d: d.weekday() < 5,
+    )
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+class FactorResultRow(TypedDict, total=False):
+    trade_date: str
+    factor_name: str
+    IC_mean: float
+    ICIR: float
+    FactorReturn_mean: float
+    QuantileMeanReturn: float
+
+
+@dataclass(frozen=True)
+class FinancialQuery:
+    code: str
+    report_type: str
+    table: Literal["balance", "income", "cashflow"]
+    date: Optional[pd.Timestamp] = None
+
+
+@dataclass(frozen=True)
+class DateRange:
+    start: Optional[pd.Timestamp]
+    end: Optional[pd.Timestamp]
+
+    def apply(self, frame: pd.DataFrame, column: str = "date") -> pd.DataFrame:
+        result = frame
+        if self.start is not None:
+            result = result[result[column] >= self.start]
+        if self.end is not None:
+            result = result[result[column] <= self.end]
+        return result
+
+
+class OHLCVRecord(TypedDict):
+    date: pd.Timestamp
+    asset: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+def _normalize_date_arg(
+    value: Union[str, dt_date, dt_datetime, pd.Timestamp, None],
+    *,
+    default: Union[str, dt_date, dt_datetime, pd.Timestamp, None] = None,
+    as_date: bool = False,
+) -> Optional[Union[pd.Timestamp, dt.date]]:
+    """将日期参数统一转换为 Timestamp 或 date，兼容字符串和原始对象。"""
+
+    if value is None:
+        if default is None:
+            return None
+        value = default
+
+    ts = pd.to_datetime(value)
+    if pd.isna(ts):  # pd.to_datetime(None) -> NaT
+        return None
+
+    if as_date:
+        return pd.Timestamp(ts).date()
+    return pd.Timestamp(ts)
+
+
+def _normalize_code_arg(
+    codes: Union[str, int, Iterable[Union[str, int]], None],
+    *,
+    allow_none: bool = True,
+    deduplicate: bool = True,
+) -> Optional[List[str]]:
+    """将股票代码统一转换为 6 位数字字符串，兼容多种输入格式。"""
+
+    if codes is None:
+        return None if allow_none else []
+
+    if isinstance(codes, (str, bytes, int)):
+        iterable = [codes]
+    elif isinstance(codes, Iterable):
+        iterable = list(codes)
+    else:
+        iterable = [codes]
+
+    normalized: List[str] = []
+    for raw_code in iterable:
+        if raw_code is None:
+            continue
+        code_str = str(raw_code).strip()
+        if not code_str:
+            continue
+
+        upper = code_str.upper()
+        match = re.search(r"\d{6}", upper)
+        if match:
+            digits = match.group(0)
+        elif upper.isdigit() and len(upper) <= 6:
+            digits = upper
+        else:
+            digits = upper
+
+        if digits.isdigit():
+            digits = digits.zfill(6)
+
+        normalized.append(digits)
+
+    if deduplicate:
+        seen = set()
+        deduped: List[str] = []
+        for code in normalized:
+            if code not in seen:
+                seen.add(code)
+                deduped.append(code)
+        normalized = deduped
+
+    return normalized
+
+
+def _ensure_exchange_prefix(code: Union[str, int]) -> str:
+    """把股票代码统一转成带交易所前缀的形式 (sh/sz/bj)。"""
+
+    normalized = _normalize_code_arg(code, allow_none=False, deduplicate=False)
+    if not normalized:
+        raise ValueError(f"无法识别股票代码: {code!r}")
+
+    digits = normalized[0]
+    if digits.startswith("6"):
+        return f"sh{digits}"
+    if digits.startswith(("0", "3")):
+        return f"sz{digits}"
+    if digits.startswith(("4", "8")):
+        return f"bj{digits}"
+    return digits
+
+
+def _ensure_exchange_suffix(code: Union[str, int]) -> str:
+    """把股票代码统一转成带交易所后缀的形式 (.XSHG/.XSHE/.XBJ)。"""
+
+    code_str = str(code).strip()
+    if not code_str:
+        return code_str
+
+    code_upper = code_str.upper()
+    if code_upper.startswith(("SH", "SZ", "BJ")) and code_upper[2:].isdigit():
+        return code_str
+    if code_upper.endswith((".XSHG", ".XSHE", ".XBJ")):
+        return code_upper
+
+    normalized = _normalize_code_arg(code, allow_none=False, deduplicate=False)
+    if not normalized:
+        raise ValueError(f"无法识别股票代码: {code!r}")
+
+    digits = normalized[0]
+    if digits.startswith("6"):
+        return f"{digits}.XSHG"
+    if digits.startswith(("0", "3")):
+        return f"{digits}.XSHE"
+    if digits.startswith(("4", "8")):
+        return f"{digits}.XBJ"
+    return digits
+
+
+OSS_EXCEPTIONS = getattr(oss2, "exceptions", None)
+NO_SUCH_KEY_ERROR = getattr(OSS_EXCEPTIONS, "NoSuchKey", FileNotFoundError)
+OSS_GENERIC_ERROR = getattr(OSS_EXCEPTIONS, "OssError", Exception)
+
+
+_OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID")
+_OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET")
+_OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
+_OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "test123432")
+
+if not _OSS_ACCESS_KEY_ID or not _OSS_ACCESS_KEY_SECRET:
+    LOGGER.warning("OSS 访问凭证未配置，相关函数将无法访问 OSS 资源")
+    auth = None
+    bucket = None
+else:
+    auth = oss2.Auth(_OSS_ACCESS_KEY_ID, _OSS_ACCESS_KEY_SECRET)
+    bucket = oss2.Bucket(auth, _OSS_ENDPOINT, _OSS_BUCKET_NAME)
 
 
 
@@ -132,37 +251,54 @@ def load_new_stocks(
     返回 DataFrame(index=date, columns=股票代码, values=今开)。
     """
     # ---------------- 日期范围处理 ----------------
-    if start is None:
-        start = dt.date(2000, 1, 1)
-    else:
-        start = pd.to_datetime(start).date()
-    if end is None:
-        end = dt.date.today()
-    else:
-        end = pd.to_datetime(end).date()
+    start_date = _normalize_date_arg(start, default=dt.date(2000, 1, 1), as_date=True)
+    end_date = _normalize_date_arg(end, default=dt.date.today(), as_date=True)
 
-    file_map = _collect_files(start, end)
+    normalized_codes = _normalize_code_arg(codes)
+
+    LOGGER.debug("加载 OSS 快照数据: codes=%s, start=%s, end=%s", normalized_codes, start_date, end_date)
+    file_map = _collect_files(start_date, end_date)
     if not file_map:
         return pd.DataFrame(dtype=float)   # 无数据
 
     # ---------------- 股票代码过滤 ----------------
-    if codes is not None:
-        if isinstance(codes, str):
-            codes = [codes]
-        codes = [str(c).zfill(6) for c in codes]
+    if normalized_codes:
+        LOGGER.debug("快照筛选股票代码: %s", normalized_codes)
 
     # ---------------- 逐文件读取并合并 ----------------
     frames = []
     for file_date, key in sorted(file_map.items()):
         local_path = f"/tmp/{key.split('/')[-1]}"
-        bucket.get_object_to_file(key, local_path)
+        try:
+            bucket.get_object_to_file(key, local_path)
+        except NO_SUCH_KEY_ERROR as exc:
+            message = f"OSS 上找不到快照文件: {key}"
+            LOGGER.error(message)
+            raise FileNotFoundError(message) from exc
+        except OSS_GENERIC_ERROR as exc:
+            message = f"下载 OSS 快照文件失败: {key}"
+            LOGGER.error(message, exc_info=exc)
+            raise ConnectionError(message) from exc
 
-        df = pd.read_csv(local_path, dtype={"代码": str})
+        try:
+            df = pd.read_csv(local_path, dtype={"代码": str})
+        except pd.errors.EmptyDataError:
+            LOGGER.warning("文件 %s 为空，已跳过", key)
+            continue
+        except pd.errors.ParserError as exc:
+            message = f"文件 {key} 解析失败: {exc}"
+            LOGGER.error(message)
+            raise ValueError(message) from exc
+
         df = df[["代码", "今开"]].rename(columns={"代码": "asset", "今开": "close"})
-        if codes:
-            df = df[df["asset"].isin(codes)]
         df["date"] = pd.to_datetime(file_date)
+        if normalized_codes:
+            df = df[df["asset"].isin(normalized_codes)]
         frames.append(df)
+
+    if not frames:
+        LOGGER.warning("区间 %s-%s 内未找到可用的快照数据", start_date, end_date)
+        return pd.DataFrame(dtype=float)
 
     df_all = pd.concat(frames, ignore_index=False)
 
@@ -174,12 +310,6 @@ def load_new_stocks(
     )
     return prices
 
-from typing import Union, List
-import datetime as dt
-import pandas as pd
-import oss2   # 假设 bucket 已全局初始化好
-import io
-
 def load_oss_stocks(
     codes: Union[str, List[str]] = None,
     start: str = None,
@@ -190,57 +320,51 @@ def load_oss_stocks(
     返回 DataFrame(index=date, columns=股票代码, values=收盘价)。
     """
     # ---------------- 日期范围处理 ----------------
-    if start is None:
-        start = dt.date(2000, 1, 1)
-    else:
-        start = pd.to_datetime(start).date()
-
-    if end is None:
-        end = dt.date.today()
-    else:
-        end = pd.to_datetime(end).date()
+    start_date = _normalize_date_arg(start, default=dt.date(2000, 1, 1), as_date=True)
+    end_date = _normalize_date_arg(end, default=dt.date.today(), as_date=True)
 
     # ---------------- 股票代码过滤 ----------------
-    if codes is not None:
-        if isinstance(codes, str):
-            codes = [codes]
-        codes = [c.zfill(6) for c in codes]
+    normalized_codes = _normalize_code_arg(codes)
+    if normalized_codes is None:
+        LOGGER.warning("load_oss_stocks 未提供 codes，返回空结果")
+        return pd.DataFrame(dtype=float)
 
     # ---------------- 遍历 OSS 目录 ----------------
     prefix = "hangqing/daily_data/"
     frames = []
-    def add_prefix(code: str) -> str:
-        code = str(code).zfill(6)
-        if code.startswith("6"):
-            return "sh" + code
-        elif code.startswith(("0", "3")):
-            return "sz" + code
-        elif code.startswith(("4", "8")):
-            return "bj" + code
-        else:
-            return code
 
-    for code in codes:
+    for code in normalized_codes:
         try:
-            fname = add_prefix(code) + ".csv"
+            fname = _ensure_exchange_prefix(code) + ".csv"
             content = bucket.get_object(prefix + fname).read()
-            # 只把可能出问题的列强制 str，close 让 pandas 自己推断
-            df = pd.read_csv(io.BytesIO(content),
-                            dtype={"代码": str, "日期": str})
-        except Exception:
+        except NO_SUCH_KEY_ERROR:
+            LOGGER.warning("OSS 未找到股票 %s 的日线数据", code)
             continue
+        except OSS_GENERIC_ERROR as exc:
+            message = f"下载股票 {code} 的日线数据失败"
+            LOGGER.error(message, exc_info=exc)
+            raise ConnectionError(message) from exc
+
+        try:
+            df = pd.read_csv(io.BytesIO(content),
+                             dtype={"代码": str, "日期": str})
+        except pd.errors.ParserError as exc:
+            message = f"股票 {code} 的 CSV 解析失败: {exc}"
+            LOGGER.error(message)
+            raise ValueError(message) from exc
 
         # 日期、价格列统一命名
         df["date"] = pd.to_datetime(df["日期"])
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
 
         # 日期过滤
-        mask = (df["date"].dt.date >= start) & (df["date"].dt.date <= end)
+        mask = (df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)
         df = df.loc[mask, ["date", "close"]]
         df["asset"] = code
         frames.append(df)
 
     if not frames:
+        LOGGER.warning("未能获取任何股票的 OSS 行情数据: %s", normalized_codes)
         return pd.DataFrame(dtype=float)
 
     df_all = pd.concat(frames, ignore_index=True)
@@ -259,167 +383,313 @@ def load_oss_stocks(
     return prices
 
 
-
-def load_modelscope_stocks(
-    codes: Union[str, List[str]],
-    start: str = None,
-    end: str = None,
-) -> pd.DataFrame:
-    """
-    下载多只股票日线 CSV（伪装成 .npy），合并后按日期过滤，
-    返回只含 ['date', 'asset', 'close'] 三列的 DataFrame，
-    且以 'date' 作为 DatetimeIndex，可直接用作 alphalens 的 pricing_df。
-    """
-    base_url = "https://modelscope.cn/api/v1/datasets/yuping322/stock_zh_a_daily/repo"
-    params_tpl = {"Revision": "master", "FilePath": None}
-
-    if isinstance(codes, str):
-        codes = [codes]
-
-    # 自动加前缀
-    def add_prefix(code: str) -> str:
-        code = str(code).zfill(6)
-        if code.startswith("6"):
-            return "sh" + code
-        elif code.startswith(("0", "3")):
-            return "sz" + code
-        elif code.startswith(("4", "8")):
-            return "bj" + code
-        else:
-            return code
-
-    frames = []
-    for code in codes:
-        fname = f"{add_prefix(code)}.npy"
-        params = params_tpl.copy()
-        params["FilePath"] = fname
-
-        resp = requests.get(base_url, params=params, timeout=30)
-        resp.raise_for_status()
-
-        df = pd.read_csv(io.BytesIO(resp.content))
-
-        # 统一列名并只保留我们需要的三列
-        df.columns = [c.strip().lower() for c in df.columns]
-        rename_map = {
-            "日期": "date",
-            "symbol": "asset",
-            "close": "close",
-        }
-        df = (
-            df.rename(columns=rename_map)
-              .assign(asset=code)  # 用原始纯数字代码做 asset
-              .loc[:, ["date", "asset", "close"]]
-        )
-
-        # 转日期
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        frames.append(df)
-
-
-    df_all = pd.concat(frames, ignore_index=True)
-
-    # 日期过滤
-    if start is not None:
-        df_all = df_all[df_all["date"] >= pd.to_datetime(start)]
-    if end is not None:
-        df_all = df_all[df_all["date"] <= pd.to_datetime(end)]
-
-    # 转宽表：日期为 index，股票代码为列
-    prices = (
-        df_all
-        .pivot(index="date", columns="asset", values="close")
-        .sort_index()
-    )
-
-    return prices
-
-import requests, io
-import pandas as pd
-    
-def load_modelscope_complex_stocks(
-    codes: Union[str, List[str]],
+def load_oss_complex_stocks(
+    codes: Union[str, List[str]] = None,
     start: str = None,
     end: str = None,
     fields: Union[str, List[str]] = "close",
-) -> pd.DataFrame:
+) -> Union[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """
-    下载多只股票日线 CSV（伪装成 .npy），按日期过滤。
-    默认只返回收盘价宽表，列为原始股票代码。
+    从 OSS 目录 hangqing/daily_data/ 拉取 start~end 区间内所有股票的日线行情，
+    支持多字段返回。
     
-    fields:
+    参数
+    ----
+    codes : str | List[str] | None
+        股票代码列表
+    start : str | None
+        开始日期
+    end : str | None
+        结束日期
+    fields : str | List[str]
+        字段名，支持：
         - "close" (默认): 收盘价
         - "all": 所有字段，返回 dict {字段名: DataFrame}
         - [字段列表]: 指定字段列表，返回 dict
+        
+    返回
+    ----
+    pd.DataFrame | Dict[str, pd.DataFrame]
+        单个字段返回DataFrame，多个字段返回Dict
     """
+    # ---------------- 日期范围处理 ----------------
+    start_date = _normalize_date_arg(start, default=dt.date(2000, 1, 1), as_date=True)
+    end_date = _normalize_date_arg(end, default=dt.date.today(), as_date=True)
 
+    # ---------------- 股票代码过滤 ----------------
+    normalized_codes = _normalize_code_arg(codes)
+    if normalized_codes is None:
+        LOGGER.warning("load_oss_complex_stocks 未提供 codes，返回空结果")
+        if isinstance(fields, str) and fields.lower() == "all":
+            return {}
+        if isinstance(fields, list):
+            return {}
+        return pd.DataFrame(dtype=float)
 
-    base_url = "https://modelscope.cn/api/v1/datasets/yuping322/stock_zh_a_daily/repo"
-    params_tpl = {"Revision": "master", "FilePath": None}
-
-    if isinstance(codes, str):
-        codes = [codes]
-
-    # 下载用的带前缀股票代码
-    def download_code(code: str) -> str:
-        code = str(code).zfill(6)
-        if code.startswith("6"):
-            return "sh" + code
-        elif code.startswith(("0", "3")):
-            return "sz" + code
-        elif code.startswith(("4", "8")):
-            return "bj" + code
-        else:
-            return code
-
+    # ---------------- 遍历 OSS 目录 ----------------
+    prefix = "hangqing/daily_data/"
     frames = []
-    for code in codes:
-        fname = f"{download_code(code)}.npy"
-        params = params_tpl.copy()
-        params["FilePath"] = fname
 
-        resp = requests.get(base_url, params=params, timeout=30)
-        resp.raise_for_status()
+    for code in normalized_codes:
+        try:
+            fname = _ensure_exchange_prefix(code) + ".csv"
+            content = bucket.get_object(prefix + fname).read()
+        except NO_SUCH_KEY_ERROR:
+            LOGGER.warning("OSS 未找到股票 %s 的日线数据", code)
+            continue
+        except OSS_GENERIC_ERROR as exc:
+            message = f"下载股票 {code} 的日线数据失败"
+            LOGGER.error(message, exc_info=exc)
+            raise ConnectionError(message) from exc
 
-        df = pd.read_csv(io.BytesIO(resp.content))
-        df.columns = [c.strip().lower() for c in df.columns]
+        try:
+            df = pd.read_csv(io.BytesIO(content),
+                             dtype={"代码": str, "日期": str})
+        except pd.errors.ParserError as exc:
+            message = f"股票 {code} 的 CSV 解析失败: {exc}"
+            LOGGER.error(message)
+            raise ValueError(message) from exc
 
-        # 统一列名
-        rename_map = {"日期": "date", "symbol": "asset", "close": "close"}
-        df = df.rename(columns=rename_map)
+        # 日期、价格列统一命名
+        df["date"] = pd.to_datetime(df["日期"])
+        
+        # 转换数值列
+        numeric_columns = ['open', 'high', 'low', 'close', 'volume', 'amount', 'outstanding_share', 'turnover']
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # 用原始数字代码作为 asset
+        # 日期过滤
+        mask = (df["date"].dt.date >= start_date) & (df["date"].dt.date <= end_date)
+        df = df.loc[mask]
         df["asset"] = code
-
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        
+        # 只保留需要的列
+        keep_columns = ["date", "asset"] + [col for col in numeric_columns if col in df.columns]
+        df = df[keep_columns]
         frames.append(df)
 
-    df_all = pd.concat(frames, ignore_index=True)
+    if not frames:
+        LOGGER.warning("未能获取任何股票的 OSS 行情数据: %s", normalized_codes)
+        if isinstance(fields, str) and fields.lower() == "all":
+            return {}
+        if isinstance(fields, list):
+            return {}
+        return pd.DataFrame(dtype=float)
 
-    # 日期过滤
-    if start is not None:
-        df_all = df_all[df_all["date"] >= pd.to_datetime(start)]
-    if end is not None:
-        df_all = df_all[df_all["date"] <= pd.to_datetime(end)]
+    df_all = pd.concat(frames, ignore_index=True)
+    df_all = df_all.drop_duplicates(subset=["date", "asset"], keep="last")
 
     # 根据 fields 返回
     if isinstance(fields, str) and fields.lower() == "all":
         # 全部字段转宽表（除了 'asset'、'date'）
         value_cols = [c for c in df_all.columns if c not in ["date", "asset"]]
-        result = {col: df_all.pivot(index="date", columns="asset", values=col) for col in value_cols}
+        result = {col: df_all.pivot(index="date", columns="asset", values=col).sort_index() 
+                 for col in value_cols if col in df_all.columns}
         return result
 
     elif isinstance(fields, str):
         # 单个字段
+        if fields not in df_all.columns:
+            LOGGER.warning("字段 %s 不存在，可用字段: %s", fields, list(df_all.columns))
+            return pd.DataFrame(dtype=float)
         return df_all.pivot(index="date", columns="asset", values=fields).sort_index()
 
     elif isinstance(fields, list):
         # 多个字段 -> dict
-        result = {col: df_all.pivot(index="date", columns="asset", values=col) for col in fields if col in df_all.columns}
+        result = {}
+        for col in fields:
+            if col in df_all.columns:
+                result[col] = df_all.pivot(index="date", columns="asset", values=col).sort_index()
+            else:
+                LOGGER.warning("字段 %s 不存在，可用字段: %s", col, list(df_all.columns))
         return result
 
     else:
         raise ValueError("fields 必须是 'close' / 'all' / [字段列表]")
+
+
+# def load_modelscope_stocks(
+#     codes: Union[str, List[str]],
+#     start: str = None,
+#     end: str = None,
+# ) -> pd.DataFrame:
+#     """
+#     下载多只股票日线 CSV（伪装成 .npy），合并后按日期过滤，
+#     返回只含 ['date', 'asset', 'close'] 三列的 DataFrame，
+#     且以 'date' 作为 DatetimeIndex，可直接用作 alphalens 的 pricing_df。
+#     """
+#     base_url = "https://modelscope.cn/api/v1/datasets/yuping322/stock_zh_a_daily/repo"
+#     params_tpl = {"Revision": "master", "FilePath": None}
+
+#     normalized_codes = _normalize_code_arg(codes, allow_none=False)
+#     if not normalized_codes:
+#         LOGGER.warning("模型数据源未提供有效股票代码: %s", codes)
+#         return pd.DataFrame(columns=["date", "asset", "close"])
+
+#     date_range = DateRange(
+#         start=_normalize_date_arg(start),
+#         end=_normalize_date_arg(end),
+#     )
+
+#     frames = []
+#     for code in normalized_codes:
+#         prefixed = _ensure_exchange_prefix(code)
+#         fname = f"{prefixed}.npy"
+#         params = params_tpl.copy()
+#         params["FilePath"] = fname
+
+#         try:
+#             resp = requests.get(base_url, params=params, timeout=30)
+#             resp.raise_for_status()
+#         except requests.RequestException as exc:
+#             message = f"下载模型数据 {fname} 失败: {exc}"
+#             LOGGER.error(message)
+#             raise ConnectionError(message) from exc
+
+#         try:
+#             df = pd.read_csv(io.BytesIO(resp.content))
+#         except pd.errors.ParserError as exc:
+#             message = f"模型数据 {fname} 解析失败: {exc}"
+#             LOGGER.error(message)
+#             raise ValueError(message) from exc
+
+#         # 统一列名并只保留我们需要的三列
+#         df.columns = [c.strip().lower() for c in df.columns]
+#         rename_map = {
+#             "日期": "date",
+#             "symbol": "asset",
+#             "close": "close",
+#         }
+#         df = (
+#             df.rename(columns=rename_map)
+#               .assign(asset=code)  # 用原始纯数字代码做 asset
+#               .loc[:, ["date", "asset", "close"]]
+#         )
+
+#         # 转日期
+#         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+#         df = date_range.apply(df)
+#         frames.append(df)
+
+
+#     if not frames:
+#         LOGGER.warning("模型数据源未返回任何记录: codes=%s", normalized_codes)
+#         return pd.DataFrame(columns=["date", "asset", "close"])
+
+#     df_all = pd.concat(frames, ignore_index=True)
+
+#     # 日期过滤
+#     df_all = date_range.apply(df_all)
+
+#     # 转宽表：日期为 index，股票代码为列
+#     prices = (
+#         df_all
+#         .pivot(index="date", columns="asset", values="close")
+#         .sort_index()
+#     )
+#     return prices
+
+
+# def load_modelscope_complex_stocks(
+#     codes: Union[str, List[str]],
+#     start: str = None,
+#     end: str = None,
+#     fields: Union[str, List[str]] = "close",
+# ) -> pd.DataFrame:
+#     """
+#     下载多只股票日线 CSV（伪装成 .npy），按日期过滤。
+#     默认只返回收盘价宽表，列为原始股票代码。
+    
+#     fields:
+#         - "close" (默认): 收盘价
+#         - "all": 所有字段，返回 dict {字段名: DataFrame}
+#         - [字段列表]: 指定字段列表，返回 dict
+#     """
+
+
+#     base_url = "https://modelscope.cn/api/v1/datasets/yuping322/stock_zh_a_daily/repo"
+#     params_tpl = {"Revision": "master", "FilePath": None}
+
+#     normalized_codes = _normalize_code_arg(codes, allow_none=False)
+#     if not normalized_codes:
+#         LOGGER.warning("模型复杂数据源未提供有效股票代码: %s", codes)
+#         if isinstance(fields, str) and fields.lower() == "all":
+#             return {}
+#         if isinstance(fields, list):
+#             return {}
+#         return pd.DataFrame()
+
+#     date_range = DateRange(
+#         start=_normalize_date_arg(start),
+#         end=_normalize_date_arg(end),
+#     )
+
+#     frames = []
+#     for code in normalized_codes:
+#         prefixed = _ensure_exchange_prefix(code)
+#         fname = f"{prefixed}.npy"
+#         params = params_tpl.copy()
+#         params["FilePath"] = fname
+
+#         try:
+#             resp = requests.get(base_url, params=params, timeout=30)
+#             resp.raise_for_status()
+#         except requests.RequestException as exc:
+#             message = f"下载模型数据 {fname} 失败: {exc}"
+#             LOGGER.error(message)
+#             raise ConnectionError(message) from exc
+
+#         try:
+#             df = pd.read_csv(io.BytesIO(resp.content))
+#         except pd.errors.ParserError as exc:
+#             message = f"模型数据 {fname} 解析失败: {exc}"
+#             LOGGER.error(message)
+#             raise ValueError(message) from exc
+#         df.columns = [c.strip().lower() for c in df.columns]
+
+#         # 统一列名
+#         rename_map = {"日期": "date", "symbol": "asset", "close": "close"}
+#         df = df.rename(columns=rename_map)
+
+#         # 用原始数字代码作为 asset
+#         df["asset"] = code
+
+#         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+#         df = date_range.apply(df)
+#         frames.append(df)
+
+#     if not frames:
+#         LOGGER.warning("模型复杂数据源未返回任何记录: codes=%s", normalized_codes)
+#         if isinstance(fields, str) and fields.lower() == "all":
+#             return {}
+#         if isinstance(fields, list):
+#             return {}
+#         return pd.DataFrame()
+
+#     df_all = pd.concat(frames, ignore_index=True)
+
+#     # 日期过滤
+#     df_all = date_range.apply(df_all)
+
+#     # 根据 fields 返回
+#     if isinstance(fields, str) and fields.lower() == "all":
+#         # 全部字段转宽表（除了 'asset'、'date'）
+#         value_cols = [c for c in df_all.columns if c not in ["date", "asset"]]
+#         result = {col: df_all.pivot(index="date", columns="asset", values=col) for col in value_cols}
+#         return result
+
+#     elif isinstance(fields, str):
+#         # 单个字段
+#         return df_all.pivot(index="date", columns="asset", values=fields).sort_index()
+
+#     elif isinstance(fields, list):
+#         # 多个字段 -> dict
+#         result = {col: df_all.pivot(index="date", columns="asset", values=col) for col in fields if col in df_all.columns}
+#         return result
+
+#     else:
+#         raise ValueError("fields 必须是 'close' / 'all' / [字段列表]")
 
 
 
@@ -447,35 +717,9 @@ def _normalize_codes(codes: List[str]) -> List[str]:
     把 6 位数字自动补全为带交易所后缀的标准格式，
     已经是完整格式的保持不变。
     """
-    def _suffix(code: str) -> str:
-        # 去掉空格
-        code = str(code).strip()
-        # 已经是 .XSHG / .XSHE 结尾
-        if code.endswith(('.XSHG', '.XSHE')):
-            return code
-        # 6 位纯数字
-        if code.isdigit() and len(code) == 6:
-            return code + ('.XSHG' if code.startswith('6') else '.XSHE')
-        # 其他情况原样返回
-        return code
-
-    return [_suffix(c) for c in codes]
+    return [_ensure_exchange_suffix(code) for code in codes]
 
 
-
-# ---------------- OSS 初始化 ----------------
-# 建议放到外部配置，避免重复初始化
-# auth = oss2.Auth(os.getenv("OSS_KEY_ID"), os.getenv("OSS_KEY_SECRET"))
-auth = oss2.Auth(os.getenv("OSS_ACCESS_KEY_ID"), os.getenv("OSS_ACCESS_KEY_SECRET"))
-
-bucket = oss2.Bucket(
-    auth,
-    "https://oss-cn-hangzhou.aliyuncs.com",  # 替换成你的 endpoint
-    "test123432"                       # 替换成你的 bucket
-)
-
-from typing import List, Optional
-import pandas as pd
 
 def read_factor_data(
     codes: Optional[List[str]] = None,
@@ -623,19 +867,48 @@ def factor_for_al(
     factor_name: str,
     *,
     factors: Optional[List[str]] = None,
-    base_path: str = "uploads"
+    base_path: str = "uploads",
+    file_path: Optional[str] = None
 ) -> pd.Series:
     """
     返回 alphalens 所需的因子 Series，索引为 (date, asset)，
     asset 统一为纯 6 位数字字符串。
+    
+    参数
+    ----
+    codes : list[str]
+        股票代码列表
+    start_date : str
+        开始日期
+    end_date : str
+        结束日期
+    factor_name : str
+        因子名称
+    factors : list[str] | None
+        因子列表（兼容旧接口）
+    base_path : str
+        OSS 或本地目录前缀
+    file_path : str | None
+        如果提供文件路径，则直接从该文件加载（优先级最高）
+        文件格式: CSV，需包含 date, code 列和因子列
     """
-    df = read_factor_data(
-        codes,
-        start_date,
-        end_date,
-        factors=(factors or [factor_name]),
-        base_path=base_path
-    )
+    # 优先从文件加载
+    if file_path and os.path.exists(file_path):
+        df = _load_factor_from_file(file_path, codes, start_date, end_date, factor_name)
+    else:
+        # 从 OSS 或本地目录加载
+        df = read_factor_data(
+            codes,
+            start_date,
+            end_date,
+            factors=(factors or [factor_name]),
+            base_path=base_path
+        )
+
+    if df.empty:
+        # 返回空 Series
+        idx = pd.MultiIndex.from_tuples([], names=['date', 'asset'])
+        return pd.Series(index=idx, dtype=float)
 
     if factor_name not in df.columns:
         raise KeyError(f"因子 '{factor_name}' 不在数据中，可用列：{df.columns.tolist()}")
@@ -654,6 +927,76 @@ def factor_for_al(
 
     factor_series.index.names = ['date', 'asset']
     return factor_series
+
+
+def _load_factor_from_file(
+    file_path: str,
+    codes: List[str],
+    start_date: str,
+    end_date: str,
+    factor_name: str
+) -> pd.DataFrame:
+    """
+    从单个文件加载因子数据
+    
+    参数
+    ----
+    file_path : str
+        文件路径
+    codes : list[str]
+        股票代码列表
+    start_date : str
+        开始日期
+    end_date : str
+        结束日期
+    factor_name : str
+        因子名称
+        
+    返回
+    ----
+    pd.DataFrame
+        以 (date, code) 为 MultiIndex 的 DataFrame
+    """
+    try:
+        # 读取文件，代码列保持字符串格式
+        df = pd.read_csv(file_path, dtype={'code': str})
+        
+        # 检查必要的列
+        if 'date' not in df.columns or 'code' not in df.columns:
+            raise ValueError(f"文件必须包含 'date' 和 'code' 列")
+        
+        if factor_name not in df.columns:
+            raise ValueError(f"文件必须包含因子列 '{factor_name}'")
+        
+        # 日期列转换为 datetime
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # 标准化代码列（去掉后缀并补齐6位）
+        df['code'] = df['code'].astype(str).str.replace('.XSHG', '', regex=False).str.replace('.XSHE', '', regex=False)
+        df['code'] = df['code'].str.zfill(6)  # 补齐6位
+        
+        # 过滤日期范围
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+        
+        # 过滤股票代码
+        if codes:
+            # 标准化代码（去掉后缀用于匹配）
+            codes_normalized = [_normalize_code_arg([c], allow_none=False)[0] for c in codes]
+            df = df[df['code'].isin(codes_normalized)]
+        
+        if df.empty:
+            idx = pd.MultiIndex.from_tuples([], names=["date", "code"])
+            return pd.DataFrame(index=idx)
+        
+        # 设置 MultiIndex
+        df = df.set_index(['date', 'code']).sort_index()
+        
+        return df
+        
+    except Exception as e:
+        print(f"从文件加载因子数据失败 {file_path}: {e}")
+        idx = pd.MultiIndex.from_tuples([], names=["date", "code"])
+        return pd.DataFrame(index=idx)
 
 # 新增：把结果存到 OSS
 def save_result(bucket, date_tag: str, res_dict: dict):
@@ -695,7 +1038,7 @@ def handler(event, context):
     event = event or {}
 
     # 1. 计算窗口：默认「今天-30」~「今天-1」
-    today = pd.Timestamp(datetime.date.today())
+    today = pd.Timestamp(dt.date.today())
     start_date = (today - pd.Timedelta(days=3)).strftime("%Y%m%d")
     end_date   = (today - pd.Timedelta(days=1)).strftime("%Y%m%d")  # 昨天收盘
 
@@ -710,7 +1053,7 @@ def handler(event, context):
     codes_in_factor = factor_df.index.get_level_values('asset').unique().tolist()
     codes_in_factor =codes_in_factor[0:20]
     print(codes_in_factor)
-    prices_df = load_modelscope_stocks(codes_in_factor,
+    prices_df = load_oss_stocks(codes_in_factor,
                             start=pd.to_datetime(start_date),
                             end=pd.to_datetime(end_date))
 
@@ -743,16 +1086,6 @@ def handler(event, context):
     return res
 
 
-
-import os
-import io
-import pandas as pd
-from datetime import date as dt_date, datetime as dt_datetime
-from typing import List, Optional, Union
-from typing import Union, Literal
-
-
-
 # ---------- 默认日期策略 ----------
 def _get_default_date():
     """
@@ -769,18 +1102,34 @@ def _get_default_date():
 
 # ---------- 数据 IO ----------
 def _load_index_df(index_symbol: str) -> pd.DataFrame:
+    """
+    从OSS加载指数成分股数据
+    
+    文件格式：index/{code}_{name}.csv (如: index/000300_沪深300.csv)
+    """
+    # 查找带中文名称的文件
     prefix = f"index/{index_symbol}_"
     for obj in oss2.ObjectIterator(bucket, prefix=prefix):
         if obj.key.endswith(".csv"):
             content = bucket.get_object(obj.key).read()
             df = pd.read_csv(io.BytesIO(content), dtype=str)
-            rename = {"品种代码": "code", "指数纳入日期": "in_date"}
+            
+            # 重命名列
+            rename = {"品种代码": "code", "纳入日期": "in_date"}
             df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-            df["in_date"] = pd.to_datetime(df["in_date"], errors="coerce")
-            if df["in_date"].isna().any():
-                raise ValueError("日期列解析失败")
+            
+            # 手动转换日期，避免pandas的重复键问题
+            date_col = df["in_date"].copy()
+            df["in_date"] = pd.Series([pd.to_datetime(d, errors="coerce") for d in date_col])
+            
+            # 检查是否有无效日期
+            na_count = df["in_date"].isna().sum()
+            if na_count > 0:
+                LOGGER.warning(f"有 {na_count} 个无效日期，已过滤")
+                df = df.dropna(subset=["in_date"])
             return df
-    raise FileNotFoundError(f"OSS 上找不到 {index_symbol}_*.csv")
+    
+    raise FileNotFoundError(f"OSS 上找不到 {index_symbol} 相关的指数文件")
 
 # ---------- 主 API ----------
 def get_index_stocks(
@@ -789,15 +1138,28 @@ def get_index_stocks(
 ) -> List[str]:
     """
     获取指定指数在指定时刻已纳入的成分券代码列表。
+    支持特殊股票池类型：
+    - 'HS300': 沪深300
+    - 'ZZ500': 中证500  
+    - 'ZZ800': 中证800
+    - 'CYBZ': 创业板指
+    - 'ZXBZ': 中小板指
+    - 'A': 全A股
+    - 'AA': 全A股（排除科创板、创业板）
+    - 'small': 小盘股
+    - 'small_25': 小盘股（市值<25亿）
+    - 'small_fengzhi': 小盘股（市值<80亿）
+    
     参数
     ----
     index_symbol : str
-        指数代码，如 '000300'
+        指数代码，如 '000300' 或特殊股票池类型
     date : str | datetime.date | datetime.datetime | None
         查询日期；None 时根据环境自动选择默认时间
     返回
     ----
     List[str]
+        股票代码列表
     """
     # 1. 统一转换成 pandas.Timestamp
     if date is None:
@@ -811,23 +1173,71 @@ def get_index_stocks(
     else:
         raise TypeError("date 必须是 str / datetime.date / datetime.datetime / None")
 
-    # 2. 取数并过滤
-    df = _load_index_df(index_symbol)
-    codes = df.loc[df["in_date"] <= ts, "code"].drop_duplicates().tolist()
-    return codes
+    def _get_stocks_for_index(symbol: str) -> List[str]:
+        """内部函数：获取单个指数的成分股"""
+        try:
+            df = _load_index_df(symbol)
+            # 先按日期过滤
+            mask = df["in_date"] <= ts
+            df = df.loc[mask]
+            # 按股票代码分组，保留最新的记录
+            df = df.sort_values("in_date").groupby("code").last().reset_index()
+            return df["code"].tolist()
+        except Exception as e:
+            LOGGER.warning(f"获取指数 {symbol} 成分股失败: {e}")
+            return []
+
+    # 2. 处理特殊股票池类型
+    if index_symbol == 'HS300':
+        stockList = _get_stocks_for_index('000300')
+    elif index_symbol == 'ZZ500':
+        stockList = _get_stocks_for_index('399905')
+    elif index_symbol == 'ZZ800':
+        stockList = _get_stocks_for_index('399906')
+    elif index_symbol == 'CYBZ':
+        stockList = _get_stocks_for_index('399006')
+    elif index_symbol == 'ZXBZ':
+        stockList = _get_stocks_for_index('399005')
+    elif index_symbol == 'A':
+        stockList = _get_stocks_for_index('000002') + _get_stocks_for_index('399107')
+        stockList = [stock for stock in stockList if not stock.startswith(('68', '4', '8'))]
+    elif index_symbol == 'AA':
+        stockList = _get_stocks_for_index('000985')
+        stockList = [stock for stock in stockList if not stock.startswith(('3', '68', '4', '8'))]
+    elif index_symbol == 'small':
+        stockList = _get_stocks_for_index('399101')
+        stockList = [stock for stock in stockList if not stock.startswith(('68', '4', '8'))]
+    elif index_symbol == 'small_25':
+        initial_list = _get_stocks_for_index('000002') + _get_stocks_for_index('399107')
+        # 注意：这里需要实现 get_fundamentals 函数来获取市值数据
+        # 暂时返回初始列表，实际使用时需要根据具体的数据源实现
+        stockList = initial_list[:50]  # 临时实现
+    elif index_symbol == 'small_fengzhi':
+        initial_list = _get_stocks_for_index('000002') + _get_stocks_for_index('399107')
+        # 注意：这里需要实现 get_fundamentals 函数来获取市值数据
+        # 暂时返回过滤后的列表，实际使用时需要根据具体的数据源实现
+        stockList = [stock for stock in initial_list if not stock.startswith(('3','68', '4', '8'))]
+    else:
+        # 3. 处理普通指数代码
+        stockList = _get_stocks_for_index(index_symbol)
+    
+    # 4. 直接返回股票列表（过滤功能已移除）
+    return stockList
+
+
+
+
+
+
+
+
+
+
 
 # ---------- 工具 ----------
 def _add_prefix(code: str) -> str:
     """自动补 6 位并加交易所前缀"""
-    code = str(code).zfill(6)
-    if code.startswith("6"):
-        return "sh" + code
-    elif code.startswith(("0", "3")):
-        return "sz" + code
-    elif code.startswith(("4", "8")):
-        return "bj" + code
-    else:
-        return code
+    return _ensure_exchange_prefix(code)
 
 def _parse_date(d: Union[str, dt_date, dt_datetime, None]) -> pd.Timestamp:
     """统一转成 pandas.Timestamp"""
@@ -914,7 +1324,7 @@ def get_cashflow(code: str,
     return _get_fin_df(code, date, report_type, table="cashflow")
 
 def get_valuation(code: str,
-                  date: Union[str, dt_date, dt_datetime, None] = None):
+                  date: Union[str, dt_date, dt_datetime, None] = None) -> pd.DataFrame:
     
     key = f"hangqing/daily_data/{_add_prefix(code)}.csv"
     try:
@@ -928,18 +1338,25 @@ def get_valuation(code: str,
     
     df = pd.read_csv(io.BytesIO(content), dtype=str)
 
+    # 解析日期列，兼容字符串格式
+    if "日期" in df.columns:
+        df["日期"] = pd.to_datetime(df["日期"], errors="coerce")
+
     if date:
-        mask = df["日期"] <= _parse_date(date)
-        df = df.loc[mask]
+        target_dt = _parse_date(date)
+        if "日期" in df.columns:
+            mask = df["日期"] <= target_dt
+            df = df.loc[mask]
+        else:
+            raise KeyError("数据缺少 '日期' 列，无法按日期过滤")
 
-    return df.sort_values("日期", ascending=False).reset_index(drop=True)
+    df = df.sort_values("日期", ascending=False).reset_index(drop=True)
 
+    # 恢复日期格式为字符串，保持对外接口一致
+    if "日期" in df.columns:
+        df["日期"] = df["日期"].dt.strftime("%Y-%m-%d")
 
-import os, re, warnings
-import pandas as pd
-from datetime import date as dt_date, datetime as dt_datetime
-from typing import Union, List, Dict, Optional
-
+    return df
 
 # ---------- 只改动 get_history_fundamentals ----------
 def get_history_fundamentals(
@@ -1245,10 +1662,6 @@ def print_table_columns(table: Literal["balance", "income", "cashflow"], code: s
     # get_index_stocks("000002")
     
 
-import datetime as dt
-import chinese_calendar as calendar
-from typing import List
-
 def get_trading_dates(
     start: str | dt.date | dt.datetime,
     end: str | dt.date | dt.datetime,
@@ -1286,9 +1699,14 @@ def get_trading_dates(
     
     # 2. 逐日循环
     trading_days = []
+    if CALENDAR_AVAILABLE and calendar is not None:
+        is_workday = calendar.is_workday  # type: ignore[attr-defined]
+    else:
+        is_workday = lambda d: d.weekday() < 5  # noqa: E731
+
     current = start_date
     while current <= end_date:
-        if calendar.is_workday(current):
+        if is_workday(current):
             trading_days.append(current)
         current += dt.timedelta(days=1)
     
@@ -1339,21 +1757,49 @@ def _wide_to_ohlcv(wide: pd.DataFrame) -> pd.DataFrame:
     
     return: DataFrame[date, asset, open, high, low, close, volume]
     """
-    # 如果存在 '最新价' 列，说明是 CSV 快照
     df = wide.copy()
-    if "date" not in df.columns:
-        # 单日 CSV，没有 date 列，用今天日期填充
-        df["date"] = pd.to_datetime("today").normalize()
-    ohlcv = df[["date", "代码", "今开", "最高", "最低", "最新价", "成交量"]].copy()
-    ohlcv.rename(columns={
-        "代码": "asset",
-        "今开": "open",
-        "最高": "high",
-        "最低": "low",
-        "最新价": "close",
-        "成交量": "volume"
-    }, inplace=True)
-    return ohlcv[["date", "asset", "open", "high", "low", "close", "volume"]]
+    snapshot_cols = {"代码", "今开", "最高", "最低", "最新价", "成交量"}
+
+    if snapshot_cols.issubset(df.columns):
+        # 处理单日 CSV 快照
+        if "date" not in df.columns:
+            df["date"] = pd.to_datetime("today").normalize()
+        ohlcv = df[["date", "代码", "今开", "最高", "最低", "最新价", "成交量"]].copy()
+        ohlcv.rename(columns={
+            "代码": "asset",
+            "今开": "open",
+            "最高": "high",
+            "最低": "low",
+            "最新价": "close",
+            "成交量": "volume",
+        }, inplace=True)
+        return ohlcv[["date", "asset", "open", "high", "low", "close", "volume"]]
+
+    # 处理宽表：index 为日期，列为股票代码，值为价格
+    if "date" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+
+    if df.index.name != "date":
+        df.index.name = "date"
+
+    long = (
+        df.stack(dropna=False)
+        .rename("close")
+        .reset_index()
+        .rename(columns={"level_1": "asset"})
+    )
+
+    long["open"] = long["close"]
+    long["high"] = long["close"]
+    long["low"] = long["close"]
+    long["volume"] = 0.0
+
+    ordered_cols = ["date", "asset", "open", "high", "low", "close", "volume"]
+    return long[ordered_cols]
 
 
 def load_bt_oss_stocks(
@@ -1365,23 +1811,14 @@ def load_bt_oss_stocks(
     从 OSS 目录 /stock_zh_a_spot_em/ 拉取 start~end 区间内的所有快照，
     返回 DataFrame，保留原始字段（'代码','今开','最新价','最高','最低','成交量'等）
     """
-    if start is None:
-        start = dt.date(2000, 1, 1)
-    else:
-        start = pd.to_datetime(start).date()
-    if end is None:
-        end = dt.date.today()
-    else:
-        end = pd.to_datetime(end).date()
+    start_date = _normalize_date_arg(start, default=dt.date(2000, 1, 1), as_date=True)
+    end_date = _normalize_date_arg(end, default=dt.date.today(), as_date=True)
 
-    file_map = _collect_files(start, end)
+    file_map = _collect_files(start_date, end_date)
     if not file_map:
         return pd.DataFrame()   # 无数据
 
-    if codes is not None:
-        if isinstance(codes, str):
-            codes = [codes]
-        codes = [str(c).zfill(6) for c in codes]
+    normalized_codes = _normalize_code_arg(codes)
 
     frames = []
     for file_date, key in sorted(file_map.items()):
@@ -1391,8 +1828,8 @@ def load_bt_oss_stocks(
         df = pd.read_csv(local_path, dtype={"代码": str})
 
         # 只过滤指定股票
-        if codes:
-            df = df[df["代码"].isin(codes)]
+        if normalized_codes:
+            df = df[df["代码"].isin(normalized_codes)]
 
         df["date"] = pd.to_datetime(file_date)
         frames.append(df)
@@ -1435,7 +1872,8 @@ def load_bt_stocks(
 
     feeds: Dict[str, bt.feeds.PandasData] = {}
 
-    for code in codes:
+    normalized_codes = _normalize_code_arg(codes, allow_none=False) or []
+    for code in normalized_codes:
         sub = ohlcv[ohlcv["asset"] == code].copy()
         if sub.empty:
             print(f"跳过股票 {code}, 没有历史行情数据")
@@ -1532,11 +1970,6 @@ def get_index_daily(
     return df.set_index("date")["nav"]
 
 
-
-from typing import Union, List
-import pandas as pd
-import backtrader as bt
-
 def load_bt_pricing(
     codes: Union[str, List[str]] = None,
     start: str = None,
@@ -1560,7 +1993,6 @@ def load_bt_pricing(
     # 2. 逐个把 PandasData 里的 DataFrame 拿出来拼到一张宽表
     frames = []
     for code, data in feeds.items():
-        # data 是 PandasData，真正的 DataFrame 藏在 data.params.dataname
         df = data.params.dataname.copy()
         df = df[["close"]].rename(columns={"close": code})
         frames.append(df)

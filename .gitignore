@@ -1,1 +1,51 @@
+# 环境配置和敏感信息
 env.sh
+.env
+*.env
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# 日志文件
+logs/
+*.log
+
+# 结果和缓存目录
+results/
+results_bak/
+debug_results/
+my_results/
+test_results/
+cache/
+akshare_cache/
+stock_cache/
+
+# 数据文件
+data/
+all_a_stocks.csv
+monitor.csv
+
+# IDE配置
+.vscode/
+.venv/
+.idea/
+*.swp
+*.swo
+
+# 临时文件
+*.tmp
+*.temp
+/tmp/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 测试相关
+test_stock_pools.py
+test_stock_pools_mock.py
+check_oss_files.py

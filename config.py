@@ -95,6 +95,54 @@ PERFORMANCE_METRICS = {
         "description": "总交易次数",
         "format": "{:d}",
         "higher_is_better": None
+    },
+    "alpha": {
+        "name": "Alpha",
+        "description": "年化Alpha系数",
+        "format": "{:.4f}",
+        "higher_is_better": True
+    },
+    "beta": {
+        "name": "Beta",
+        "description": "Beta系数",
+        "format": "{:.3f}",
+        "higher_is_better": None
+    },
+    "information_ratio": {
+        "name": "信息比率",
+        "description": "超额收益/跟踪误差",
+        "format": "{:.3f}",
+        "higher_is_better": True
+    },
+    "tracking_error": {
+        "name": "跟踪误差",
+        "description": "与基准的跟踪误差",
+        "format": "{:.2%}",
+        "higher_is_better": False
+    },
+    "calmar_ratio": {
+        "name": "卡玛比率",
+        "description": "年化收益率/最大回撤",
+        "format": "{:.3f}",
+        "higher_is_better": True
+    },
+    "var_95": {
+        "name": "VaR(95%)",
+        "description": "风险价值",
+        "format": "{:.4f}",
+        "higher_is_better": False
+    },
+    "cvar_95": {
+        "name": "CVaR(95%)",
+        "description": "条件风险价值",
+        "format": "{:.4f}",
+        "higher_is_better": False
+    },
+    "monthly_win_rate": {
+        "name": "月度胜率",
+        "description": "月度盈利概率",
+        "format": "{:.2%}",
+        "higher_is_better": True
     }
 }
 
@@ -173,6 +221,20 @@ STRATEGY_PARAMS = {
                 "min": 5,
                 "max": 60,
                 "step": 5
+            }
+        }
+    },
+    "direct_execution": {
+        "name": "直接执行策略",
+        "description": "直接执行预测数据中的持仓和权重",
+        "parameters": {
+            "hold_days": {
+                "name": "持仓天数",
+                "type": "int",
+                "default": 1,
+                "min": 1,
+                "max": 30,
+                "step": 1
             }
         }
     }

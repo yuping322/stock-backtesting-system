@@ -27,7 +27,7 @@ sns.set_style("whitegrid")
 
 # 导入原始模块
 from backtrader_base_strategy import JQ2BTBaseStrategy, get_akshare_etf_data, get_akshare_stock_data, get_index_nav, analyze_performance
-from data import get_trading_dates, load_bt_stocks, get_valuation, get_index_daily,code2name
+from data_akshare import get_trading_dates, load_bt_stocks, get_valuation, get_index_daily,code2name
 
 # =========================
 # 辅助函数
@@ -54,38 +54,38 @@ except Exception as e:
 # =========================
 # 数据加载备用函数
 # =========================
-def load_bt_stocks_fallback(
-    codes: list,
-    start: str,
-    end: str,
-    cache_dir: str = 'stock_cache'
-) -> dict:
-    """
-    备用数据加载函数 - 使用AkShare获取股票数据
-    当主数据加载失败时作为fallback使用
-    """
-    feeds = {}
+# def load_bt_stocks_fallback(
+#     codes: list,
+#     start: str,
+#     end: str,
+#     cache_dir: str = 'stock_cache'
+# ) -> dict:
+#     """
+#     备用数据加载函数 - 使用AkShare获取股票数据
+#     当主数据加载失败时作为fallback使用
+#     """
+#     feeds = {}
     
-    print(f"使用AkShare备用数据加载: {len(codes)}只股票, {start} 到 {end}")
+#     print(f"使用AkShare备用数据加载: {len(codes)}只股票, {start} 到 {end}")
     
-    for code in codes:
-        try:
-            # 尝试使用AkShare获取数据
-            print(f"  加载 {code} 数据...")
-            data_feed = get_akshare_stock_data(code, start, end, cache_dir=cache_dir)
+#     for code in codes:
+#         try:
+#             # 尝试使用AkShare获取数据
+#             print(f"  加载 {code} 数据...")
+#             data_feed = get_akshare_stock_data(code, start, end, cache_dir=cache_dir)
             
-            # get_akshare_stock_data 已经返回 Backtrader PandasData 对象
-            feeds[code] = data_feed
-            print(f"    ✅ {code} 数据加载成功")
+#             # get_akshare_stock_data 已经返回 Backtrader PandasData 对象
+#             feeds[code] = data_feed
+#             print(f"    ✅ {code} 数据加载成功")
             
-        except Exception as e:
-            print(f"    ❌ {code} 数据加载失败: {e}")
-            continue
+#         except Exception as e:
+#             print(f"    ❌ {code} 数据加载失败: {e}")
+#             continue
     
-    if not feeds:
-        print("警告: 备用数据加载也未获取到任何股票数据！")
+#     if not feeds:
+#         print("警告: 备用数据加载也未获取到任何股票数据！")
         
-    return feeds
+#     return feeds
 
 # =========================
 # 策略基类
@@ -582,10 +582,15 @@ class EnhancedBacktestEngine:
             recovery_times = self.calculate_recovery_times(drawdown)
             avg_recovery_time = np.mean(recovery_times) if recovery_times else 0
             
-            # 基准相关指标 - 添加有效性检查
+            # 基准相关指标 - 修正计算方法，与策略保持一致
             try:
-                benchmark_total_return = benchmark_nav.iloc[-1] - 1
-                benchmark_annual_return = (1 + benchmark_total_return) ** (252 / len(benchmark_nav)) - 1 if len(benchmark_nav) > 0 else 0
+                if benchmark_nav.iloc[0] > 1000:  # 绝对金额
+                    benchmark_total_return = (benchmark_nav.iloc[-1] - benchmark_nav.iloc[0]) / benchmark_nav.iloc[0]
+                else:  # 累计收益率格式
+                    benchmark_total_return = benchmark_nav.iloc[-1] - 1
+                    
+                # 使用与策略相同的时间长度计算年化收益率
+                benchmark_annual_return = (1 + benchmark_total_return) ** (252 / actual_trading_days) - 1 if actual_trading_days > 0 else 0
             except (IndexError, ZeroDivisionError, OverflowError) as e:
                 print(f"基准指标计算失败: {e}")
                 benchmark_total_return = 0
@@ -808,13 +813,23 @@ class EnhancedBacktestEngine:
             strategy_returns = strategy_returns[:min_len]
             benchmark_returns = benchmark_returns[:min_len]
         
+        if len(strategy_returns) == 0 or len(benchmark_returns) == 0:
+            return 0.0, 0.0
+        
         # 简单线性回归计算Beta
         covariance = np.cov(strategy_returns, benchmark_returns)[0, 1]
         benchmark_variance = np.var(benchmark_returns)
         
         beta = covariance / benchmark_variance if benchmark_variance != 0 else 0
-        alpha = np.mean(strategy_returns) - beta * np.mean(benchmark_returns)
+        # Alpha年化处理：(策略平均收益 - Beta * 基准平均收益) * 252
+        alpha = (np.mean(strategy_returns) - beta * np.mean(benchmark_returns)) * 252
         
+        # 确保返回有限值
+        if np.isnan(alpha) or np.isinf(alpha):
+            alpha = 0.0
+        if np.isnan(beta) or np.isinf(beta):
+            beta = 0.0
+            
         return alpha, beta
     
     def calculate_consecutive_returns(self, returns: np.ndarray) -> Tuple[List[int], List[int]]:
@@ -984,7 +999,7 @@ class EnhancedBacktestEngine:
             # 如果主数据源没有获取到任何数据，使用AkShare备用数据源
             if not feeds:
                 print("主数据源未获取到数据，尝试使用AkShare备用数据源...")
-                feeds = load_bt_stocks_fallback(stock_codes, start_date, end_date)
+                # feeds = load_bt_stocks_fallback(stock_codes, start_date, end_date)
             
             valid_stocks = []
             
@@ -1093,7 +1108,7 @@ class EnhancedBacktestEngine:
             
             # 获取基准数据
             benchmark_nav = get_index_daily(self.system_config.benchmark_index, start_date, end_date)
-            benchmark_nav = benchmark_nav.reindex(strategy_nav.index).fillna(method='ffill')
+            benchmark_nav = benchmark_nav.reindex(strategy_nav.index).ffill()
             
             # 计算日收益率
             strategy_returns = strategy_nav.pct_change().dropna().values

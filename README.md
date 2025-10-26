@@ -1,5 +1,30 @@
 # 股票回测系统
 
+## 环境配置
+
+### 环境变量设置
+在使用本系统前，需要配置OSS访问凭证。复制 `env.example` 文件为 `env.sh` 并填入您的配置信息：
+
+```bash
+cp env.example env.sh
+```
+
+编辑 `env.sh` 文件，填入您的OSS访问凭证：
+
+```bash
+# OSS配置
+OSS_ACCESS_KEY_ID=your_access_key_id_here
+OSS_ACCESS_KEY_SECRET=your_access_key_secret_here
+OSS_ENDPOINT=https://oss-cn-hangzhou.aliyuncs.com
+OSS_BUCKET_NAME=your_bucket_name_here
+
+# AkShare OSS配置
+AKSHARE_OSS_ACCESS_KEY_ID=your_akshare_access_key_id_here
+AKSHARE_OSS_ACCESS_KEY_SECRET=your_akshare_access_key_secret_here
+```
+
+**注意**: `env.sh` 文件包含敏感信息，不会被提交到Git仓库中。
+
 ## 项目概述
 
 这是一个完整的股票回测系统，基于Backtrader和Streamlit构建，支持多种交易策略、实时数据获取和丰富的分析功能。
@@ -31,21 +56,34 @@
 ## 文件结构
 
 ```
-/mnt/workspace/clean_stock_backtest/
-├── integrated_backtesting_system.py    # 集成版回测系统（主文件，2113行）
-├── backtrader_base_strategy.py         # Backtrader基础策略（1098行）
-├── data.py                             # 数据处理模块（53173行）
-├── config.py                           # 配置文件（10495行）
+/stock-backtesting-system/
+├── integrated_backtesting_system.py    # 集成版回测系统（主文件）
+├── backtrader_base_strategy.py         # Backtrader基础策略
+├── data.py                             # 数据处理模块
+├── config.py                           # 配置文件
+├── main.py                             # 命令行回测接口
+├── main_factor.py                      # 因子检验命令行入口（带画图功能）
+├── factor/                             # 因子检验模块
+│   ├── factor.py                      # 因子检验核心程序
+│   ├── factor_calculator.py           # 因子计算器接口
+│   ├── example_custom_factor.py      # 自定义因子示例
+│   └── README.md                       # 使用说明
 ├── requirements.txt                    # 依赖包列表
-├── all_a_stocks.csv                    # 股票数据文件
-├── start.sh                           # 启动脚本
+├── scripts/                           # 运行脚本目录
+│   ├── start.sh                      # 启动脚本
+│   ├── run_all_factors.sh            # 运行所有因子测试
+│   ├── run_first10_factors.sh        # 运行前10个因子测试
+│   └── run_*.sh                      # 其他运行脚本
 ├── data/                               # 数据目录
 │   ├── *.csv                         # 股票数据CSV文件
 │   ├── best_config_*.json            # 最优配置缓存
 │   ├── *predicted_tomorrow_result.json # 预测结果
 │   └── selected_stocks_*_result.json  # 选股结果
 ├── logs/                               # 日志目录
-├── __pycache__/                        # Python缓存
+├── docs/                               # 文档目录
+│   ├── factor_command_line.md        # 因子检验命令行文档
+│   ├── factor_refactoring_summary.md  # 因子模块重构说明
+│   └── ...                            # 其他文档
 └── README.md                           # 说明文档
 ```
 
@@ -83,6 +121,43 @@ streamlit run integrated_backtesting_system.py
 - 详细分析（多标签页）
 - 丰富的可视化图表
 - Alpha因子分析
+
+### 5. 因子检验（命令行）
+
+#### 方式 1: 使用 main_factor.py（推荐）
+
+`main_factor.py` 提供画图、结果保存等扩展功能：
+
+```bash
+# 基本使用（不画图）
+python main_factor.py --start 2024-01-01 --end 2024-12-31 --factors VOL10
+
+# 画图并弹窗显示
+python main_factor.py --start 2024-01-01 --end 2024-12-31 --factors VOL10 --plot true --plot-mode popup
+
+# 画图并保存到文件
+python main_factor.py --start 2024-01-01 --end 2024-12-31 --factors VOL10 --plot true --plot-mode save --output-dir results/factor_test
+
+# 查看帮助
+python main_factor.py --help
+```
+
+#### 方式 2: 使用 factor/factor.py（核心模块）
+
+```bash
+# 基本使用
+python factor/factor.py
+
+# 指定参数
+python factor/factor.py --start 2024-01-01 --end 2024-12-31 --factors VOL10
+
+# 查看帮助
+python factor/factor.py --help
+```
+
+详细使用说明请参考：
+- [docs/main_factor_usage.md](docs/main_factor_usage.md) - main_factor.py 使用文档
+- [factor/README.md](factor/README.md) - 因子模块文档
 
 ## 策略说明
 

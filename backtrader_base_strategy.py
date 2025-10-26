@@ -1,9 +1,10 @@
 import backtrader as bt
-import akshare as ak
+# import akshare as ak
 import pandas as pd
 import numpy as np
 import math
 import os
+import warnings
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 import matplotlib
@@ -13,184 +14,184 @@ import collections
 
 matplotlib.rcParams['font.family'] = 'Microsoft YaHei'
 
-# ====== 数据加载与缓存 ======
-def get_akshare_etf_data(symbol, start, end, cache_dir='etf_cache', force_update=False):
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f'{symbol}.pkl')
-    start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
-    need_download = force_update or (not os.path.exists(cache_file))
+# # ====== 数据加载与缓存 ======
+# def get_akshare_etf_data(symbol, start, end, cache_dir='etf_cache', force_update=False):
+#     os.makedirs(cache_dir, exist_ok=True)
+#     cache_file = os.path.join(cache_dir, f'{symbol}.pkl')
+#     start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+#     need_download = force_update or (not os.path.exists(cache_file))
 
-    if not need_download:
-        try:
-            df = pd.read_pickle(cache_file)
-            df['date'] = pd.to_datetime(df['日期'])
-            if df['date'].min() > start_dt or df['date'].max() < end_dt:
-                print(f"缓存时间段不全：{df['date'].min().date()} ~ {df['date'].max().date()}，需要重新下载")
-                need_download = True
-        except Exception as e:
-            print(f"读取缓存失败：{e}")
-            need_download = True
+#     if not need_download:
+#         try:
+#             df = pd.read_pickle(cache_file)
+#             df['date'] = pd.to_datetime(df['日期'])
+#             if df['date'].min() > start_dt or df['date'].max() < end_dt:
+#                 print(f"缓存时间段不全：{df['date'].min().date()} ~ {df['date'].max().date()}，需要重新下载")
+#                 need_download = True
+#         except Exception as e:
+#             print(f"读取缓存失败：{e}")
+#             need_download = True
 
-    if need_download:
-        print(f"下载 ETF 数据: {symbol}")
-        df = ak.fund_etf_hist_em(symbol=symbol)
-        if df.empty:
-            raise ValueError(f"No data returned from AkShare for symbol {symbol}")
-        df['date'] = pd.to_datetime(df['日期'])
-        df.to_pickle(cache_file)
+#     if need_download:
+#         print(f"下载 ETF 数据: {symbol}")
+#         df = ak.fund_etf_hist_em(symbol=symbol)
+#         if df.empty:
+#             raise ValueError(f"No data returned from AkShare for symbol {symbol}")
+#         df['date'] = pd.to_datetime(df['日期'])
+#         df.to_pickle(cache_file)
 
-    df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-    if df.empty:
-        raise ValueError(f"数据时间范围内无可用数据: {start} ~ {end}")
+#     df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+#     if df.empty:
+#         raise ValueError(f"数据时间范围内无可用数据: {start} ~ {end}")
 
-    df.rename(columns={'date': 'datetime',
-                       '开盘': 'open',
-                       '最高': 'high',
-                       '最低': 'low',
-                       '收盘': 'close',
-                       '成交量': 'volume'}, inplace=True)
-    df = df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
-    df['openinterest'] = 0
+#     df.rename(columns={'date': 'datetime',
+#                        '开盘': 'open',
+#                        '最高': 'high',
+#                        '最低': 'low',
+#                        '收盘': 'close',
+#                        '成交量': 'volume'}, inplace=True)
+#     df = df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+#     df['openinterest'] = 0
 
-    data = bt.feeds.PandasData(
-        dataname=df,
-        datetime='datetime',
-        open='open',
-        high='high',
-        low='low',
-        close='close',
-        volume='volume',
-        openinterest='openinterest',
-        name=symbol
-    )
-    return data
+#     data = bt.feeds.PandasData(
+#         dataname=df,
+#         datetime='datetime',
+#         open='open',
+#         high='high',
+#         low='low',
+#         close='close',
+#         volume='volume',
+#         openinterest='openinterest',
+#         name=symbol
+#     )
+#     return data
 
-def format_stock_symbol_for_akshare(symbol):
-    """
-    将聚宽风格的股票代码（sh600000、600000.XSHG、600000、sz000001、000001.XSHE、000001）统一转为6位数字字符串。
-    """
-    if symbol.startswith('sh') or symbol.startswith('sz'):
-        symbol = symbol[2:]
-    if symbol.endswith('.XSHG') or symbol.endswith('.XSHE'):
-        symbol = symbol[:6]
-    return symbol.zfill(6)
+# def format_stock_symbol_for_akshare(symbol):
+#     """
+#     将聚宽风格的股票代码（sh600000、600000.XSHG、600000、sz000001、000001.XSHE、000001）统一转为6位数字字符串。
+#     """
+#     if symbol.startswith('sh') or symbol.startswith('sz'):
+#         symbol = symbol[2:]
+#     if symbol.endswith('.XSHG') or symbol.endswith('.XSHE'):
+#         symbol = symbol[:6]
+#     return symbol.zfill(6)
 
-def get_akshare_stock_data(symbol, start, end, cache_dir='stock_cache', force_update=False, adjust="qfq"):
-    """
-    获取A股股票日线行情数据，支持缓存
-    symbol: 股票代码，如 'sz000001' 或 'sh600000'
-    start, end: 'YYYY-MM-DD'
-    adjust: 复权方式，'qfq' 前复权，'hfq' 后复权，None 不复权
-    """
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f'{symbol}_stock_{adjust}.pkl')
-    start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
-    start_str = start_dt.strftime('%Y%m%d')
-    end_str = end_dt.strftime('%Y%m%d')
-    need_download = force_update or (not os.path.exists(cache_file))
+# def get_akshare_stock_data(symbol, start, end, cache_dir='stock_cache', force_update=False, adjust="qfq"):
+#     """
+#     获取A股股票日线行情数据，支持缓存
+#     symbol: 股票代码，如 'sz000001' 或 'sh600000'
+#     start, end: 'YYYY-MM-DD'
+#     adjust: 复权方式，'qfq' 前复权，'hfq' 后复权，None 不复权
+#     """
+#     os.makedirs(cache_dir, exist_ok=True)
+#     cache_file = os.path.join(cache_dir, f'{symbol}_stock_{adjust}.pkl')
+#     start_dt, end_dt = pd.to_datetime(start), pd.to_datetime(end)
+#     start_str = start_dt.strftime('%Y%m%d')
+#     end_str = end_dt.strftime('%Y%m%d')
+#     need_download = force_update or (not os.path.exists(cache_file))
 
-    akshare_symbol = format_stock_symbol_for_akshare(symbol)
+#     akshare_symbol = format_stock_symbol_for_akshare(symbol)
 
-    if not need_download:
-        try:
-            df = pd.read_pickle(cache_file)
-            df['date'] = pd.to_datetime(df['日期'])
-            if df['date'].min() > start_dt or df['date'].max() < end_dt:
-                print(f"股票缓存时间段不全：{df['date'].min().date()} ~ {df['date'].max().date()}，需要重新下载")
-                need_download = True
-        except Exception as e:
-            print(f"读取股票缓存失败：{e}")
-            need_download = True
+#     if not need_download:
+#         try:
+#             df = pd.read_pickle(cache_file)
+#             df['date'] = pd.to_datetime(df['日期'])
+#             if df['date'].min() > start_dt or df['date'].max() < end_dt:
+#                 print(f"股票缓存时间段不全：{df['date'].min().date()} ~ {df['date'].max().date()}，需要重新下载")
+#                 need_download = True
+#         except Exception as e:
+#             print(f"读取股票缓存失败：{e}")
+#             need_download = True
 
-    if need_download:
-        print(f"下载股票数据: {symbol} (akshare symbol: {akshare_symbol})")
-        df = ak.stock_zh_a_hist(symbol=akshare_symbol, period="daily", start_date=start_str, end_date=end_str, adjust=adjust)
-        print("下载返回数据：", df.head(), df.shape)  # 新增调试
-        if df.empty:
-            raise ValueError(f"No data returned from AkShare for symbol {symbol}")
-        df['date'] = pd.to_datetime(df['日期'])
-        df.to_pickle(cache_file)
+#     if need_download:
+#         print(f"下载股票数据: {symbol} (akshare symbol: {akshare_symbol})")
+#         df = ak.stock_zh_a_hist(symbol=akshare_symbol, period="daily", start_date=start_str, end_date=end_str, adjust=adjust)
+#         print("下载返回数据：", df.head(), df.shape)  # 新增调试
+#         if df.empty:
+#             raise ValueError(f"No data returned from AkShare for symbol {symbol}")
+#         df['date'] = pd.to_datetime(df['日期'])
+#         df.to_pickle(cache_file)
 
-    df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-    if df.empty:
-        raise ValueError(f"股票数据时间范围内无可用数据: {start} ~ {end}")
+#     df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+#     if df.empty:
+#         raise ValueError(f"股票数据时间范围内无可用数据: {start} ~ {end}")
 
-    df.rename(columns={'date': 'datetime',
-                       '开盘': 'open',
-                       '最高': 'high',
-                       '最低': 'low',
-                       '收盘': 'close',
-                       '成交量': 'volume'}, inplace=True)
-    df = df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
-    df['openinterest'] = 0
+#     df.rename(columns={'date': 'datetime',
+#                        '开盘': 'open',
+#                        '最高': 'high',
+#                        '最低': 'low',
+#                        '收盘': 'close',
+#                        '成交量': 'volume'}, inplace=True)
+#     df = df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+#     df['openinterest'] = 0
 
-    data = bt.feeds.PandasData(
-        dataname=df,
-        datetime='datetime',
-        open='open',
-        high='high',
-        low='low',
-        close='close',
-        volume='volume',
-        openinterest='openinterest',
-        name=symbol
-    )
-    return data
+#     data = bt.feeds.PandasData(
+#         dataname=df,
+#         datetime='datetime',
+#         open='open',
+#         high='high',
+#         low='low',
+#         close='close',
+#         volume='volume',
+#         openinterest='openinterest',
+#         name=symbol
+#     )
+#     return data
 
-def get_index_nav(symbol, start, end):
-    df = ak.index_zh_a_hist(symbol=symbol, period='daily')
-    df['date'] = pd.to_datetime(df['日期'])
-    df = df[(df['date'] >= pd.to_datetime(start)) & (df['date'] <= pd.to_datetime(end))]
-    df = df.sort_values('date')
-    df['nav'] = df['收盘'] / df['收盘'].iloc[0]
-    return df.set_index('date')['nav']
+# def get_index_nav(symbol, start, end):
+#     df = ak.index_zh_a_hist(symbol=symbol, period='daily')
+#     df['date'] = pd.to_datetime(df['日期'])
+#     df = df[(df['date'] >= pd.to_datetime(start)) & (df['date'] <= pd.to_datetime(end))]
+#     df = df.sort_values('date')
+#     df['nav'] = df['收盘'] / df['收盘'].iloc[0]
+#     return df.set_index('date')['nav']
 
-def get_price(symbols, start_date, end_date, frequency='daily', adjust='qfq', fields=None, cache_dir='stock_cache', force_update=False):
-    """
-    统一A股行情数据获取接口，兼容单只/多只股票，聚宽风格
-    symbols: str 或 list[str]，如 'sh600519' 或 ['sh600519', 'sz000001']
-    start_date, end_date: 'YYYY-MM-DD'
-    frequency: 'daily'（后续可扩展'minute'等）
-    adjust: 'qfq'/'hfq'/''，复权方式
-    fields: None 或 ['open','close',...]，默认全字段
-    返回: dict[symbol] -> pd.DataFrame，字段标准化（datetime, open, high, low, close, volume, openinterest）
-    """
-    if isinstance(symbols, str):
-        symbols = [symbols]
-    result = {}
-    for symbol in symbols:
-        akshare_symbol = format_stock_symbol_for_akshare(symbol)
-        cache_file = os.path.join(cache_dir, f'{symbol}_stock_{adjust}.pkl')
-        start_dt, end_dt = pd.to_datetime(start_date), pd.to_datetime(end_date)
-        start_str = start_dt.strftime('%Y%m%d')
-        end_str = end_dt.strftime('%Y%m%d')
-        os.makedirs(cache_dir, exist_ok=True)
-        need_download = force_update or (not os.path.exists(cache_file))
-        if not need_download:
-            try:
-                df = pd.read_pickle(cache_file)
-                df['date'] = pd.to_datetime(df['日期'])
-                if df['date'].min() > start_dt or df['date'].max() < end_dt:
-                    need_download = True
-            except Exception:
-                need_download = True
-        if need_download:
-            df = ak.stock_zh_a_hist(symbol=akshare_symbol, period=frequency, start_date=start_str, end_date=end_str, adjust=adjust)
-            if df.empty:
-                raise ValueError(f"No data for {symbol}")
-            df['date'] = pd.to_datetime(df['日期'])
-            df.to_pickle(cache_file)
-        df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
-        df.rename(columns={'date': 'datetime', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'}, inplace=True)
-        df = df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
-        df['openinterest'] = 0
-        if fields:
-            keep = ['datetime'] + [f for f in fields if f in df.columns]
-            if 'openinterest' in fields:
-                keep.append('openinterest')
-            df = df[keep]
-        result[symbol] = df.reset_index(drop=True)
-    return result if len(result) > 1 else result[symbols[0]]
+# def get_price(symbols, start_date, end_date, frequency='daily', adjust='qfq', fields=None, cache_dir='stock_cache', force_update=False):
+#     """
+#     统一A股行情数据获取接口，兼容单只/多只股票，聚宽风格
+#     symbols: str 或 list[str]，如 'sh600519' 或 ['sh600519', 'sz000001']
+#     start_date, end_date: 'YYYY-MM-DD'
+#     frequency: 'daily'（后续可扩展'minute'等）
+#     adjust: 'qfq'/'hfq'/''，复权方式
+#     fields: None 或 ['open','close',...]，默认全字段
+#     返回: dict[symbol] -> pd.DataFrame，字段标准化（datetime, open, high, low, close, volume, openinterest）
+#     """
+#     if isinstance(symbols, str):
+#         symbols = [symbols]
+#     result = {}
+#     for symbol in symbols:
+#         akshare_symbol = format_stock_symbol_for_akshare(symbol)
+#         cache_file = os.path.join(cache_dir, f'{symbol}_stock_{adjust}.pkl')
+#         start_dt, end_dt = pd.to_datetime(start_date), pd.to_datetime(end_date)
+#         start_str = start_dt.strftime('%Y%m%d')
+#         end_str = end_dt.strftime('%Y%m%d')
+#         os.makedirs(cache_dir, exist_ok=True)
+#         need_download = force_update or (not os.path.exists(cache_file))
+#         if not need_download:
+#             try:
+#                 df = pd.read_pickle(cache_file)
+#                 df['date'] = pd.to_datetime(df['日期'])
+#                 if df['date'].min() > start_dt or df['date'].max() < end_dt:
+#                     need_download = True
+#             except Exception:
+#                 need_download = True
+#         if need_download:
+#             df = ak.stock_zh_a_hist(symbol=akshare_symbol, period=frequency, start_date=start_str, end_date=end_str, adjust=adjust)
+#             if df.empty:
+#                 raise ValueError(f"No data for {symbol}")
+#             df['date'] = pd.to_datetime(df['日期'])
+#             df.to_pickle(cache_file)
+#         df = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+#         df.rename(columns={'date': 'datetime', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'}, inplace=True)
+#         df = df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+#         df['openinterest'] = 0
+#         if fields:
+#             keep = ['datetime'] + [f for f in fields if f in df.columns]
+#             if 'openinterest' in fields:
+#                 keep.append('openinterest')
+#             df = df[keep]
+#         result[symbol] = df.reset_index(drop=True)
+#     return result if len(result) > 1 else result[symbols[0]]
 
 def get_cashflow_sina(symbol, stat_date=None, cache_dir='stock_cache', force_update=False):
     """
@@ -529,7 +530,7 @@ import statsmodels.api as sm
 
 def analyze_performance(strategy_nav, benchmark_nav):
     strategy_nav = pd.Series(strategy_nav)
-    benchmark_nav = pd.Series(benchmark_nav).reindex(strategy_nav.index).fillna(method='ffill')
+    benchmark_nav = pd.Series(benchmark_nav).reindex(strategy_nav.index).ffill()
 
     if len(strategy_nav) < 2:
         print("策略净值数据不足，无法计算统计指标")
@@ -777,323 +778,323 @@ class JQ2BTBaseStrategy(bt.Strategy):
                 return data
         raise ValueError(f"找不到数据源: {code}")
 
-# ====== 框架主流程 ======
-def run_bt_framework(strategy_class, ETF_POOL, start_date, end_date, benchmark_symbol='000300', cash=1000000, commission=0.0002, slippage=0.0):
-    # 数据加载断言
-    datas = []
-    for symbol in ETF_POOL.keys():
-        data = get_akshare_etf_data(symbol, start_date, end_date)
-        assert data is not None, f"数据加载失败: {symbol}"
-        datas.append(data)
-    assert len(datas) == len(ETF_POOL), "数据源数量与ETF池不符"
+# # ====== 框架主流程 ======
+# def run_bt_framework(strategy_class, ETF_POOL, start_date, end_date, benchmark_symbol='000300', cash=1000000, commission=0.0002, slippage=0.0):
+#     # 数据加载断言
+#     datas = []
+#     for symbol in ETF_POOL.keys():
+#         data = get_akshare_etf_data(symbol, start_date, end_date)
+#         assert data is not None, f"数据加载失败: {symbol}"
+#         datas.append(data)
+#     assert len(datas) == len(ETF_POOL), "数据源数量与ETF池不符"
 
-    cerebro = bt.Cerebro()
-    cerebro.broker.setcash(cash)
-    cerebro.broker.setcommission(commission=commission)
-    cerebro.broker.set_slippage_perc(perc=slippage)
-    for symbol, data in zip(ETF_POOL.keys(), datas):
-        cerebro.adddata(data, name=symbol)
-    cerebro.addstrategy(strategy_class)
+#     cerebro = bt.Cerebro()
+#     cerebro.broker.setcash(cash)
+#     cerebro.broker.setcommission(commission=commission)
+#     cerebro.broker.set_slippage_perc(perc=slippage)
+#     for symbol, data in zip(ETF_POOL.keys(), datas):
+#         cerebro.adddata(data, name=symbol)
+#     cerebro.addstrategy(strategy_class)
 
-    print('Starting Portfolio Value: %.2f' % cerebro.broker.getvalue())
-    results = cerebro.run()
-    strat = results[0]
-    print('Final Portfolio Value: %.2f' % cerebro.broker.getvalue())
+#     print('Starting Portfolio Value: %.2f' % cerebro.broker.getvalue())
+#     results = cerebro.run()
+#     strat = results[0]
+#     print('Final Portfolio Value: %.2f' % cerebro.broker.getvalue())
 
-    # 输出净值序列断言
-    length = strat.datas[0].buflen()
-    dates = [strat.datas[0].datetime.date(-i) for i in range(length)]
-    dates.reverse()
-    strategy_nav = pd.Series(strat.navs, index=dates)
-    assert not strategy_nav.empty, "策略净值序列为空"
-    assert strategy_nav.isnull().sum() == 0, "策略净值序列存在缺失值"
+#     # 输出净值序列断言
+#     length = strat.datas[0].buflen()
+#     dates = [strat.datas[0].datetime.date(-i) for i in range(length)]
+#     dates.reverse()
+#     strategy_nav = pd.Series(strat.navs, index=dates)
+#     assert not strategy_nav.empty, "策略净值序列为空"
+#     assert strategy_nav.isnull().sum() == 0, "策略净值序列存在缺失值"
 
-    benchmark_nav = get_index_nav(benchmark_symbol, start_date, end_date)
-    assert not benchmark_nav.empty, "基准净值序列为空"
-    benchmark_nav = benchmark_nav.reindex(strategy_nav.index).fillna(method='ffill')
-    assert benchmark_nav.isnull().sum() == 0, "基准净值序列存在缺失值"
+#     benchmark_nav = get_index_nav(benchmark_symbol, start_date, end_date)
+#     assert not benchmark_nav.empty, "基准净值序列为空"
+#     benchmark_nav = benchmark_nav.reindex(strategy_nav.index).ffill()
+#     assert benchmark_nav.isnull().sum() == 0, "基准净值序列存在缺失值"
 
-    analyze_performance(strategy_nav, benchmark_nav)
+#     analyze_performance(strategy_nav, benchmark_nav)
 
-    plt.figure(figsize=(10, 5))
-    (strategy_nav / strategy_nav.iloc[0]).plot(label='策略净值')
-    (benchmark_nav / benchmark_nav.iloc[0]).plot(label='基准', linestyle='--')
-    plt.legend()
-    plt.title(f'{strategy_class.__name__} vs {benchmark_symbol}净值对比')
-    plt.grid(True)
-    plt.show() 
+#     plt.figure(figsize=(10, 5))
+#     (strategy_nav / strategy_nav.iloc[0]).plot(label='策略净值')
+#     (benchmark_nav / benchmark_nav.iloc[0]).plot(label='基准', linestyle='--')
+#     plt.legend()
+#     plt.title(f'{strategy_class.__name__} vs {benchmark_symbol}净值对比')
+#     plt.grid(True)
+#     plt.show() 
 
 # ====== JQData风格API适配（AkShare版） ======
 
-def get_price_jq(symbols, start_date=None, end_date=None, frequency='daily', fields=None, adjust='qfq', count=None, panel=False, fill_paused=True, skip_paused=True, cache_dir='stock_cache', force_update=False):
-    """
-    JQData风格 get_price，AkShare适配。支持单只/多只，日线/分钟，复权，字段筛选。
-    """
-    if isinstance(symbols, str):
-        symbols = [symbols]
-    result = {}
-    for symbol in symbols:
-        akshare_symbol = format_stock_symbol_for_akshare(symbol)
-        cache_file = os.path.join(cache_dir, f'{symbol}_jq_{adjust}_{frequency}.pkl')
-        os.makedirs(cache_dir, exist_ok=True)
-        need_download = force_update or (not os.path.exists(cache_file))
-        if not need_download:
-            try:
-                df = pd.read_pickle(cache_file)
-            except Exception:
-                need_download = True
-        if need_download:
-            try:
-                if frequency in ['1d', 'daily']:
-                    df = ak.stock_zh_a_hist(symbol=akshare_symbol, period='daily', start_date=start_date.replace('-', ''), end_date=end_date.replace('-', ''), adjust=adjust)
-                elif frequency in ['1m', '5m', '15m', '30m', '60m', 'minute']:
-                    period_map = {'1m': '1', '5m': '5', '15m': '15', '30m': '30', '60m': '60'}
-                    period = period_map.get(frequency, '1')
-                    df = ak.stock_zh_a_minute(symbol=akshare_symbol, period=period)
-                else:
-                    raise ValueError(f'不支持的frequency: {frequency}')
-                if df is None or df.empty:
-                    result[symbol] = pd.DataFrame()
-                    continue
-                df.to_pickle(cache_file)
-            except Exception as e:
-                warnings.warn(f"{symbol} 获取行情失败: {e}")
-                result[symbol] = pd.DataFrame()
-                continue
-        if df is None or df.empty:
-            result[symbol] = pd.DataFrame()
-            continue
-        # 兼容日期/时间字段
-        if '日期' in df.columns:
-            df['datetime'] = pd.to_datetime(df['日期'])
-        elif '时间' in df.columns:
-            df['datetime'] = pd.to_datetime(df['时间'])
-        else:
-            warnings.warn(f"{symbol} 无日期/时间字段")
-            result[symbol] = pd.DataFrame()
-            continue
-        # 筛选日期
-        if start_date and end_date:
-            df = df[(df['datetime'] >= pd.to_datetime(start_date)) & (df['datetime'] <= pd.to_datetime(end_date))]
-        # 字段映射
-        col_map = {'开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume', '成交额': 'money'}
-        for k, v in col_map.items():
-            if k in df.columns:
-                df[v] = df[k]
-        keep = ['datetime'] + [v for v in col_map.values() if v in df.columns]
-        if 'openinterest' in (fields or []):
-            df['openinterest'] = 0
-            keep.append('openinterest')
-        if fields:
-            keep = ['datetime'] + [f for f in fields if f in df.columns or f == 'openinterest']
-        df = df[keep] if keep else df
-        result[symbol] = df.reset_index(drop=True)
-    return result if len(result) > 1 else result[symbols[0]]
+# def get_price_jq(symbols, start_date=None, end_date=None, frequency='daily', fields=None, adjust='qfq', count=None, panel=False, fill_paused=True, skip_paused=True, cache_dir='stock_cache', force_update=False):
+#     """
+#     JQData风格 get_price，AkShare适配。支持单只/多只，日线/分钟，复权，字段筛选。
+#     """
+#     if isinstance(symbols, str):
+#         symbols = [symbols]
+#     result = {}
+#     for symbol in symbols:
+#         akshare_symbol = format_stock_symbol_for_akshare(symbol)
+#         cache_file = os.path.join(cache_dir, f'{symbol}_jq_{adjust}_{frequency}.pkl')
+#         os.makedirs(cache_dir, exist_ok=True)
+#         need_download = force_update or (not os.path.exists(cache_file))
+#         if not need_download:
+#             try:
+#                 df = pd.read_pickle(cache_file)
+#             except Exception:
+#                 need_download = True
+#         if need_download:
+#             try:
+#                 if frequency in ['1d', 'daily']:
+#                     df = ak.stock_zh_a_hist(symbol=akshare_symbol, period='daily', start_date=start_date.replace('-', ''), end_date=end_date.replace('-', ''), adjust=adjust)
+#                 elif frequency in ['1m', '5m', '15m', '30m', '60m', 'minute']:
+#                     period_map = {'1m': '1', '5m': '5', '15m': '15', '30m': '30', '60m': '60'}
+#                     period = period_map.get(frequency, '1')
+#                     df = ak.stock_zh_a_minute(symbol=akshare_symbol, period=period)
+#                 else:
+#                     raise ValueError(f'不支持的frequency: {frequency}')
+#                 if df is None or df.empty:
+#                     result[symbol] = pd.DataFrame()
+#                     continue
+#                 df.to_pickle(cache_file)
+#             except Exception as e:
+#                 warnings.warn(f"{symbol} 获取行情失败: {e}")
+#                 result[symbol] = pd.DataFrame()
+#                 continue
+#         if df is None or df.empty:
+#             result[symbol] = pd.DataFrame()
+#             continue
+#         # 兼容日期/时间字段
+#         if '日期' in df.columns:
+#             df['datetime'] = pd.to_datetime(df['日期'])
+#         elif '时间' in df.columns:
+#             df['datetime'] = pd.to_datetime(df['时间'])
+#         else:
+#             warnings.warn(f"{symbol} 无日期/时间字段")
+#             result[symbol] = pd.DataFrame()
+#             continue
+#         # 筛选日期
+#         if start_date and end_date:
+#             df = df[(df['datetime'] >= pd.to_datetime(start_date)) & (df['datetime'] <= pd.to_datetime(end_date))]
+#         # 字段映射
+#         col_map = {'开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume', '成交额': 'money'}
+#         for k, v in col_map.items():
+#             if k in df.columns:
+#                 df[v] = df[k]
+#         keep = ['datetime'] + [v for v in col_map.values() if v in df.columns]
+#         if 'openinterest' in (fields or []):
+#             df['openinterest'] = 0
+#             keep.append('openinterest')
+#         if fields:
+#             keep = ['datetime'] + [f for f in fields if f in df.columns or f == 'openinterest']
+#         df = df[keep] if keep else df
+#         result[symbol] = df.reset_index(drop=True)
+#     return result if len(result) > 1 else result[symbols[0]]
 
 
-def get_fundamentals_jq(query_obj, date=None, statDate=None, cache_dir='stock_cache', force_update=False):
-    """
-    JQData风格 get_fundamentals，AkShare适配。仅支持简单表名+股票+日期的场景。
-    """
-    # 这里只做简单适配，复杂query对象暂不支持
-    if not isinstance(query_obj, dict):
-        raise NotImplementedError('仅支持dict类型query_obj，如{"table": "balance", "symbol": "sh600519"}')
-    table = query_obj.get('table')
-    symbol = query_obj.get('symbol')
-    if table == 'balance':
-        return get_balance_sina(symbol, stat_date=statDate, cache_dir=cache_dir, force_update=force_update)
-    elif table == 'income':
-        return get_income_ths(symbol, cache_dir=cache_dir, force_update=force_update)
-    elif table == 'cash_flow':
-        return get_cashflow_sina(symbol, stat_date=statDate, cache_dir=cache_dir, force_update=force_update)
-    else:
-        raise NotImplementedError(f'暂不支持的table: {table}')
+# def get_fundamentals_jq(query_obj, date=None, statDate=None, cache_dir='stock_cache', force_update=False):
+#     """
+#     JQData风格 get_fundamentals，AkShare适配。仅支持简单表名+股票+日期的场景。
+#     """
+#     # 这里只做简单适配，复杂query对象暂不支持
+#     if not isinstance(query_obj, dict):
+#         raise NotImplementedError('仅支持dict类型query_obj，如{"table": "balance", "symbol": "sh600519"}')
+#     table = query_obj.get('table')
+#     symbol = query_obj.get('symbol')
+#     if table == 'balance':
+#         return get_balance_sina(symbol, stat_date=statDate, cache_dir=cache_dir, force_update=force_update)
+#     elif table == 'income':
+#         return get_income_ths(symbol, cache_dir=cache_dir, force_update=force_update)
+#     elif table == 'cash_flow':
+#         return get_cashflow_sina(symbol, stat_date=statDate, cache_dir=cache_dir, force_update=force_update)
+#     else:
+#         raise NotImplementedError(f'暂不支持的table: {table}')
 
 
-def get_history_fundamentals_jq(security, fields, watch_date=None, stat_date=None, count=1, interval='1q', stat_by_year=False, cache_dir='stock_cache', force_update=False):
-    """
-    JQData风格 get_history_fundamentals，AkShare适配。支持多股票多期。
-    """
-    return get_history_fundamentals(security, fields, watch_date=watch_date, stat_date=stat_date, count=count, interval=interval, stat_by_year=stat_by_year, cache_dir=cache_dir, force_update=force_update)
+# def get_history_fundamentals_jq(security, fields, watch_date=None, stat_date=None, count=1, interval='1q', stat_by_year=False, cache_dir='stock_cache', force_update=False):
+#     """
+#     JQData风格 get_history_fundamentals，AkShare适配。支持多股票多期。
+#     """
+#     return get_history_fundamentals(security, fields, watch_date=watch_date, stat_date=stat_date, count=count, interval=interval, stat_by_year=stat_by_year, cache_dir=cache_dir, force_update=force_update)
 
 
-def get_all_securities_jq(types=['stock'], date=None, cache_dir='meta_cache', force_update=False):
-    """
-    JQData风格 get_all_securities，AkShare适配。返回全市场股票元数据。
-    增加缓存机制，默认每日缓存一次。
-    """
-    import os
-    import pandas as pd
-    from datetime import datetime
-    os.makedirs(cache_dir, exist_ok=True)
-    today = datetime.now().strftime('%Y%m%d')
-    cache_file = os.path.join(cache_dir, f'securities_{today}.pkl')
-    need_download = force_update or (not os.path.exists(cache_file))
-    if not need_download:
-        try:
-            df = pd.read_pickle(cache_file)
-        except Exception:
-            need_download = True
-    if need_download:
-        df = ak.stock_info_a_code_name()
-        df['code'] = df['code'].apply(lambda x: 'sz' + x if x.startswith('0') else ('sh' + x if x.startswith('6') else x))
-        df['jq_code'] = df['code'].apply(lambda x: x[2:] + ('.XSHE' if x.startswith('sz') else '.XSHG' if x.startswith('sh') else ''))
-        df.to_pickle(cache_file)
-    return df
+# def get_all_securities_jq(types=['stock'], date=None, cache_dir='meta_cache', force_update=False):
+#     """
+#     JQData风格 get_all_securities，AkShare适配。返回全市场股票元数据。
+#     增加缓存机制，默认每日缓存一次。
+#     """
+#     import os
+#     import pandas as pd
+#     from datetime import datetime
+#     os.makedirs(cache_dir, exist_ok=True)
+#     today = datetime.now().strftime('%Y%m%d')
+#     cache_file = os.path.join(cache_dir, f'securities_{today}.pkl')
+#     need_download = force_update or (not os.path.exists(cache_file))
+#     if not need_download:
+#         try:
+#             df = pd.read_pickle(cache_file)
+#         except Exception:
+#             need_download = True
+#     if need_download:
+#         df = ak.stock_info_a_code_name()
+#         df['code'] = df['code'].apply(lambda x: 'sz' + x if x.startswith('0') else ('sh' + x if x.startswith('6') else x))
+#         df['jq_code'] = df['code'].apply(lambda x: x[2:] + ('.XSHE' if x.startswith('sz') else '.XSHG' if x.startswith('sh') else ''))
+#         df.to_pickle(cache_file)
+#     return df
 
 
-def get_security_info_jq(code):
-    """
-    JQData风格 get_security_info，AkShare适配。返回单只股票元数据。
-    兼容 df['code'] 为 6位数字 或 带前缀(sh/sz)。
-    """
-    df = ak.stock_info_a_code_name()
-    code_num = format_stock_symbol_for_akshare(code)
-    # 构造带前缀代码
-    if code_num.startswith('6'):
-        code_with_prefix = 'sh' + code_num
-    elif code_num.startswith('0') or code_num.startswith('3'):
-        code_with_prefix = 'sz' + code_num
-    else:
-        code_with_prefix = code_num  # fallback
-    # 先查6位数字
-    row = df[df['code'] == code_num]
-    if row.empty:
-        # 再查带前缀
-        row = df[df['code'] == code_with_prefix]
-    if row.empty:
-        # 极端情况再查大小写变体
-        row = df[df['code'].str.lower() == code_with_prefix.lower()]
-    if row.empty:
-        return None
-    return row.iloc[0].to_dict()
+# def get_security_info_jq(code):
+#     """
+#     JQData风格 get_security_info，AkShare适配。返回单只股票元数据。
+#     兼容 df['code'] 为 6位数字 或 带前缀(sh/sz)。
+#     """
+#     df = ak.stock_info_a_code_name()
+#     code_num = format_stock_symbol_for_akshare(code)
+#     # 构造带前缀代码
+#     if code_num.startswith('6'):
+#         code_with_prefix = 'sh' + code_num
+#     elif code_num.startswith('0') or code_num.startswith('3'):
+#         code_with_prefix = 'sz' + code_num
+#     else:
+#         code_with_prefix = code_num  # fallback
+#     # 先查6位数字
+#     row = df[df['code'] == code_num]
+#     if row.empty:
+#         # 再查带前缀
+#         row = df[df['code'] == code_with_prefix]
+#     if row.empty:
+#         # 极端情况再查大小写变体
+#         row = df[df['code'].str.lower() == code_with_prefix.lower()]
+#     if row.empty:
+#         return None
+#     return row.iloc[0].to_dict()
 
 
-def get_all_trade_days_jq():
-    """
-    JQData风格 get_all_trade_days，AkShare适配。返回所有交易日。
-    """
-    df = ak.tool_trade_date_hist_sina()
-    return pd.to_datetime(df['trade_date']).tolist()
+# def get_all_trade_days_jq():
+#     """
+#     JQData风格 get_all_trade_days，AkShare适配。返回所有交易日。
+#     """
+#     df = ak.tool_trade_date_hist_sina()
+#     return pd.to_datetime(df['trade_date']).tolist()
 
 
-def get_extras_jq(field, securities, start_date=None, end_date=None, df=True, cache_dir='extras_cache', force_update=False):
-    """
-    JQData风格 get_extras，AkShare适配。支持ST、停牌等。
-    增加缓存机制，默认每日缓存一次。
-    """
-    import os
-    import pandas as pd
-    from datetime import datetime
-    os.makedirs(cache_dir, exist_ok=True)
-    today = datetime.now().strftime('%Y%m%d')
-    if field == 'is_st':
-        cache_file = os.path.join(cache_dir, f'is_st_{today}.pkl')
-        need_download = force_update or (not os.path.exists(cache_file))
-        if not need_download:
-            try:
-                st_df = pd.read_pickle(cache_file)
-            except Exception:
-                need_download = True
-        if need_download:
-            st_df = ak.stock_zh_a_st_em()
-            st_df.to_pickle(cache_file)
-        if isinstance(securities, str):
-            securities = [securities]
-        result = st_df[st_df['代码'].isin([s[2:] if s.startswith(('sh', 'sz')) else s for s in securities])]
-        return result
-    elif field == 'is_paused':
-        cache_file = os.path.join(cache_dir, f'is_paused_{today}.pkl')
-        need_download = force_update or (not os.path.exists(cache_file))
-        if not need_download:
-            try:
-                stop_df = pd.read_pickle(cache_file)
-            except Exception:
-                need_download = True
-        if need_download:
-            stop_df = ak.stock_zh_a_stop_em()
-            stop_df.to_pickle(cache_file)
-        if isinstance(securities, str):
-            securities = [securities]
-        result = stop_df[stop_df['代码'].isin([s[2:] if s.startswith(('sh', 'sz')) else s for s in securities])]
-        return result
-    else:
-        raise NotImplementedError(f'暂不支持的extras字段: {field}')
+# def get_extras_jq(field, securities, start_date=None, end_date=None, df=True, cache_dir='extras_cache', force_update=False):
+#     """
+#     JQData风格 get_extras，AkShare适配。支持ST、停牌等。
+#     增加缓存机制，默认每日缓存一次。
+#     """
+#     import os
+#     import pandas as pd
+#     from datetime import datetime
+#     os.makedirs(cache_dir, exist_ok=True)
+#     today = datetime.now().strftime('%Y%m%d')
+#     if field == 'is_st':
+#         cache_file = os.path.join(cache_dir, f'is_st_{today}.pkl')
+#         need_download = force_update or (not os.path.exists(cache_file))
+#         if not need_download:
+#             try:
+#                 st_df = pd.read_pickle(cache_file)
+#             except Exception:
+#                 need_download = True
+#         if need_download:
+#             st_df = ak.stock_zh_a_st_em()
+#             st_df.to_pickle(cache_file)
+#         if isinstance(securities, str):
+#             securities = [securities]
+#         result = st_df[st_df['代码'].isin([s[2:] if s.startswith(('sh', 'sz')) else s for s in securities])]
+#         return result
+#     elif field == 'is_paused':
+#         cache_file = os.path.join(cache_dir, f'is_paused_{today}.pkl')
+#         need_download = force_update or (not os.path.exists(cache_file))
+#         if not need_download:
+#             try:
+#                 stop_df = pd.read_pickle(cache_file)
+#             except Exception:
+#                 need_download = True
+#         if need_download:
+#             stop_df = ak.stock_zh_a_stop_em()
+#             stop_df.to_pickle(cache_file)
+#         if isinstance(securities, str):
+#             securities = [securities]
+#         result = stop_df[stop_df['代码'].isin([s[2:] if s.startswith(('sh', 'sz')) else s for s in securities])]
+#         return result
+#     else:
+#         raise NotImplementedError(f'暂不支持的extras字段: {field}')
 
 
-def get_billboard_list_jq(stock_list=None, end_date=None, count=30, cache_dir='billboard_cache', force_update=False):
-    """
-    JQData风格 get_billboard_list，AkShare适配。龙虎榜。
-    增加缓存机制，默认每日缓存一次。
-    """
-    import os
-    import pandas as pd
-    from datetime import datetime
-    os.makedirs(cache_dir, exist_ok=True)
-    today = datetime.now().strftime('%Y%m%d')
-    cache_file = os.path.join(cache_dir, f'billboard_{today}.pkl')
-    need_download = force_update or (not os.path.exists(cache_file))
-    if not need_download:
-        try:
-            df = pd.read_pickle(cache_file)
-        except Exception:
-            need_download = True
-    if need_download:
-        df = ak.stock_lhb_detail_em()
-        df.to_pickle(cache_file)
-    if stock_list:
-        if isinstance(stock_list, str):
-            stock_list = [stock_list]
-        df = df[df['代码'].isin([s[2:] if s.startswith(('sh', 'sz')) else s for s in stock_list])]
-    if end_date:
-        df = df[df['日期'] <= end_date]
-    if count:
-        df = df.tail(count)
-    return df
+# def get_billboard_list_jq(stock_list=None, end_date=None, count=30, cache_dir='billboard_cache', force_update=False):
+#     """
+#     JQData风格 get_billboard_list，AkShare适配。龙虎榜。
+#     增加缓存机制，默认每日缓存一次。
+#     """
+#     import os
+#     import pandas as pd
+#     from datetime import datetime
+#     os.makedirs(cache_dir, exist_ok=True)
+#     today = datetime.now().strftime('%Y%m%d')
+#     cache_file = os.path.join(cache_dir, f'billboard_{today}.pkl')
+#     need_download = force_update or (not os.path.exists(cache_file))
+#     if not need_download:
+#         try:
+#             df = pd.read_pickle(cache_file)
+#         except Exception:
+#             need_download = True
+#     if need_download:
+#         df = ak.stock_lhb_detail_em()
+#         df.to_pickle(cache_file)
+#     if stock_list:
+#         if isinstance(stock_list, str):
+#             stock_list = [stock_list]
+#         df = df[df['代码'].isin([s[2:] if s.startswith(('sh', 'sz')) else s for s in stock_list])]
+#     if end_date:
+#         df = df[df['日期'] <= end_date]
+#     if count:
+#         df = df.tail(count)
+#     return df
 
 
-def get_factor_values_jq(securities, factors, end_date=None, count=1):
-    """
-    JQData风格 get_factor_values，AkShare暂不支持，需自定义。
-    """
-    raise NotImplementedError('AkShare暂不支持聚宽因子库，需自定义实现')
+# def get_factor_values_jq(securities, factors, end_date=None, count=1):
+#     """
+#     JQData风格 get_factor_values，AkShare暂不支持，需自定义。
+#     """
+#     raise NotImplementedError('AkShare暂不支持聚宽因子库，需自定义实现')
 
 
-def get_bars_jq(security, count, unit='1d', fields=None, include_now=False, end_dt=None):
-    """
-    JQData风格 get_bars，AkShare适配。分钟/日线历史K线。
-    """
-    akshare_symbol = format_stock_symbol_for_akshare(security)
-    try:
-        if unit in ['1d', 'daily']:
-            df = ak.stock_zh_a_hist(symbol=akshare_symbol, period='daily')
-        else:
-            period_map = {'1m': '1', '5m': '5', '15m': '15', '30m': '30', '60m': '60'}
-            period = period_map.get(unit, '1')
-            df = ak.stock_zh_a_minute(symbol=akshare_symbol, period=period)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        # 兼容日期/时间字段
-        if '日期' in df.columns:
-            df['datetime'] = pd.to_datetime(df['日期'])
-        elif '时间' in df.columns:
-            df['datetime'] = pd.to_datetime(df['时间'])
-        else:
-            warnings.warn(f"{security} 无日期/时间字段")
-            return pd.DataFrame()
-        if end_dt:
-            df = df[df['datetime'] <= pd.to_datetime(end_dt)]
-        if count:
-            df = df.tail(count)
-        col_map = {'开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume', '成交额': 'money'}
-        for k, v in col_map.items():
-            if k in df.columns:
-                df[v] = df[k]
-        keep = ['datetime'] + [v for v in col_map.values() if v in df.columns]
-        if fields:
-            keep = ['datetime'] + [f for f in fields if f in df.columns]
-        df = df[keep] if keep else df
-        return df.reset_index(drop=True)
-    except Exception as e:
-        warnings.warn(f"{security} 获取bars失败: {e}")
-        return pd.DataFrame() 
+# def get_bars_jq(security, count, unit='1d', fields=None, include_now=False, end_dt=None):
+#     """
+#     JQData风格 get_bars，AkShare适配。分钟/日线历史K线。
+#     """
+#     akshare_symbol = format_stock_symbol_for_akshare(security)
+#     try:
+#         if unit in ['1d', 'daily']:
+#             df = ak.stock_zh_a_hist(symbol=akshare_symbol, period='daily')
+#         else:
+#             period_map = {'1m': '1', '5m': '5', '15m': '15', '30m': '30', '60m': '60'}
+#             period = period_map.get(unit, '1')
+#             df = ak.stock_zh_a_minute(symbol=akshare_symbol, period=period)
+#         if df is None or df.empty:
+#             return pd.DataFrame()
+#         # 兼容日期/时间字段
+#         if '日期' in df.columns:
+#             df['datetime'] = pd.to_datetime(df['日期'])
+#         elif '时间' in df.columns:
+#             df['datetime'] = pd.to_datetime(df['时间'])
+#         else:
+#             warnings.warn(f"{security} 无日期/时间字段")
+#             return pd.DataFrame()
+#         if end_dt:
+#             df = df[df['datetime'] <= pd.to_datetime(end_dt)]
+#         if count:
+#             df = df.tail(count)
+#         col_map = {'开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume', '成交额': 'money'}
+#         for k, v in col_map.items():
+#             if k in df.columns:
+#                 df[v] = df[k]
+#         keep = ['datetime'] + [v for v in col_map.values() if v in df.columns]
+#         if fields:
+#             keep = ['datetime'] + [f for f in fields if f in df.columns]
+#         df = df[keep] if keep else df
+#         return df.reset_index(drop=True)
+#     except Exception as e:
+#         warnings.warn(f"{security} 获取bars失败: {e}")
+#         return pd.DataFrame() 
