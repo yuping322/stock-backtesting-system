@@ -19,6 +19,10 @@ from backtrader_base_strategy import JQ2BTBaseStrategy
 from data import get_trading_dates, load_bt_stocks, get_index_daily, code2name
 # from data_akshare import get_trading_dates, load_bt_stocks, get_index_daily, code2name
 
+from metrics.portfolio_structure import structure_metrics
+from metrics.trade_metrics import trading_metrics
+from metrics.risk_extension import extended_risk_metrics
+
 
 # 导入配置模块
 try:
@@ -674,12 +678,19 @@ class BacktestEngine:
         benchmark_nav = self._load_benchmark_nav(start_date, end_date, strategy_nav.index)
         strategy_returns = strategy_nav.pct_change().dropna().values
 
-        detailed_results = self.calculate_detailed_metrics(strategy_nav, benchmark_nav, strategy_returns)
+        trade_history = getattr(strategy, '_trade_history', [])
+        daily_holdings = getattr(strategy, '_daily_holdings', [])
+
+        detailed_results = self.calculate_detailed_metrics(
+            strategy_nav,
+            benchmark_nav,
+            strategy_returns,
+            trade_history=trade_history,
+            daily_holdings=daily_holdings,
+        )
         monthly_stats = self.generate_period_stats(strategy_nav, benchmark_nav, 'M')
         yearly_stats = self.generate_period_stats(strategy_nav, benchmark_nav, 'Y')
 
-        trade_history = getattr(strategy, '_trade_history', [])
-        daily_holdings = getattr(strategy, '_daily_holdings', [])
         final_value = cerebro.broker.getvalue()
 
         return BacktestResult(
@@ -810,23 +821,57 @@ class BacktestEngine:
 
         return feeds
     
-    def calculate_detailed_metrics(self, strategy_nav: pd.Series, benchmark_nav: pd.Series, returns: np.ndarray) -> Dict:
-        """计算详细的性能指标"""
+    def calculate_detailed_metrics(
+        self,
+        strategy_nav: pd.Series,
+        benchmark_nav: pd.Series,
+        returns: np.ndarray,
+        trade_history: Optional[List[dict]] = None,
+        daily_holdings: Optional[List[dict]] = None,
+    ) -> Dict:
+        """计算详细的性能指标，并整合结构、交易与扩展风险指标。"""
+
+        trade_history = list(trade_history or [])
+        daily_holdings = list(daily_holdings or [])
+
+        # 预先计算额外指标，确保即使主流程提前返回也能提供结果
+        try:
+            structure_info = structure_metrics(daily_holdings)
+        except Exception as exc:
+            print(f"结构指标计算失败: {exc}")
+            structure_info = structure_metrics([])
+
+        nav_for_turnover = strategy_nav.dropna() if isinstance(strategy_nav, pd.Series) else pd.Series(dtype=float)
+        try:
+            trading_info = trading_metrics(trade_history, nav_series=nav_for_turnover)
+        except Exception as exc:
+            print(f"交易指标计算失败: {exc}")
+            trading_info = trading_metrics([])
+
+        try:
+            extended_risk_info = extended_risk_metrics(strategy_nav)
+        except Exception as exc:
+            print(f"扩展风险指标计算失败: {exc}")
+            extended_risk_info = extended_risk_metrics(pd.Series(dtype=float))
+
+        def finalize(metrics_dict: Dict[str, Any]) -> Dict[str, Any]:
+            return self._apply_additional_metrics(metrics_dict, structure_info, trading_info, extended_risk_info)
+
         try:
             # 基本参数验证
             if len(strategy_nav) == 0 or len(benchmark_nav) == 0 or len(returns) == 0:
                 print("警告：策略净值、基准净值或收益数据为空，返回空指标")
-                return self._create_empty_metrics()
-            
+                return finalize(self._create_empty_metrics())
+
             # 验证输入数据的有效性
             if strategy_nav.isna().all() or benchmark_nav.isna().all():
                 print("警告：策略净值或基准净值全部为NaN，返回空指标")
-                return self._create_empty_metrics()
-            
+                return finalize(self._create_empty_metrics())
+
             if np.isnan(returns).all():
                 print("警告：收益数据全部为NaN，返回空指标")
-                return self._create_empty_metrics()
-            
+                return finalize(self._create_empty_metrics())
+
             # 基本指标计算
             if np.isinf(strategy_nav.iloc[0]) or np.isinf(strategy_nav.iloc[-1]) or strategy_nav.iloc[0] == 0:
                 total_return = 0.0
@@ -836,22 +881,22 @@ class BacktestEngine:
                 total_return = (final_capital - initial_capital) / initial_capital if initial_capital != 0 else 0.0
             else:
                 total_return = strategy_nav.iloc[-1] - 1
-            
+
             # 年化收益率
             actual_trading_days = len(strategy_nav) - 1
             if actual_trading_days > 0:
                 annual_return = (1 + total_return) ** (252 / actual_trading_days) - 1
             else:
                 annual_return = 0
-            
+
             volatility = np.std(returns) * np.sqrt(252) if len(returns) > 1 else 0
             sharpe_ratio = annual_return / volatility if volatility > 0 and not np.isnan(volatility) and not np.isinf(volatility) else 0
-            
+
             # 最大回撤
             running_max = strategy_nav.cummax()
             drawdown = (strategy_nav - running_max) / running_max
             max_drawdown = drawdown.min()
-            
+
             # 基准相关指标
             try:
                 if np.isinf(benchmark_nav.iloc[0]) or benchmark_nav.iloc[0] == 0:
@@ -860,13 +905,13 @@ class BacktestEngine:
                     benchmark_total_return = (benchmark_nav.iloc[-1] - benchmark_nav.iloc[0]) / benchmark_nav.iloc[0] if benchmark_nav.iloc[0] != 0 else 0.0
                 else:
                     benchmark_total_return = benchmark_nav.iloc[-1] - 1
-                    
+
                 benchmark_annual_return = (1 + benchmark_total_return) ** (252 / actual_trading_days) - 1 if actual_trading_days > 0 else 0
             except (IndexError, ZeroDivisionError, OverflowError) as e:
                 print(f"基准指标计算失败: {e}")
                 benchmark_total_return = 0
                 benchmark_annual_return = 0
-            
+
             # Alpha和Beta
             try:
                 benchmark_returns = benchmark_nav.pct_change().dropna().values
@@ -881,19 +926,21 @@ class BacktestEngine:
             except Exception as e:
                 print(f"Alpha/Beta计算失败: {e}")
                 alpha, beta = 0, 0
-            
+
             # 其他指标
             if np.isinf(returns).any() or np.isnan(returns).any():
                 win_rate = 0.0
             else:
                 win_rate = (returns > 0).mean() if len(returns) > 0 else 0
-            
+
             # 确保所有数值都是有限值
             def safe_float(value):
-                if np.isnan(value) or np.isinf(value):
-                    return 0.0
-                return float(value)
-            
+                if isinstance(value, (int, float, np.number)):
+                    if np.isnan(value) or np.isinf(value):
+                        return 0.0
+                    return float(value)
+                return 0.0
+
             performance_data = {
                 'total_return': safe_float(total_return),
                 'annual_return': safe_float(annual_return),
@@ -905,23 +952,24 @@ class BacktestEngine:
                 'beta': safe_float(beta),
                 'benchmark_annual_return': safe_float(benchmark_annual_return),
             }
-            
+
             performance_df = pd.DataFrame(list(performance_data.items()), columns=['metric', 'value'])
             performance_df = performance_df.set_index('metric')
-            
+
             detailed_metrics = {
                 'drawdown_series': drawdown,
                 'running_max': running_max,
             }
-            
-            return {
+
+            metrics_dict = {
                 'performance_df': performance_df,
-                'detailed_metrics': detailed_metrics
+                'detailed_metrics': detailed_metrics,
             }
-            
+            return finalize(metrics_dict)
+
         except Exception as e:
             print(f"计算详细指标时出错: {e}")
-            return self._create_empty_metrics()
+            return finalize(self._create_empty_metrics())
     
     def _create_empty_metrics(self) -> Dict:
         """创建空指标"""
@@ -934,6 +982,7 @@ class BacktestEngine:
             'win_rate': 0.0,
             'alpha': 0.0,
             'beta': 0.0,
+            'benchmark_annual_return': 0.0,
         }
         
         performance_df = pd.DataFrame(list(performance_data.items()), columns=['metric', 'value'])
@@ -948,6 +997,111 @@ class BacktestEngine:
             'performance_df': performance_df,
             'detailed_metrics': detailed_metrics
         }
+
+    def _apply_additional_metrics(
+        self,
+        metrics: Dict[str, Any],
+        structure_info: Dict[str, Any],
+        trading_info: Dict[str, Any],
+        extended_risk_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """将结构、交易与扩展风险指标注入 performance/detailed 结果。"""
+
+        performance_df = metrics.get('performance_df') if isinstance(metrics, dict) else None
+        detailed_metrics = metrics.get('detailed_metrics') if isinstance(metrics, dict) else {}
+        if not isinstance(detailed_metrics, dict):
+            detailed_metrics = {}
+
+        def to_float(value: Any) -> Optional[float]:
+            if isinstance(value, (int, np.integer)):
+                return float(value)
+            if isinstance(value, (float, np.floating)):
+                if np.isnan(value) or np.isinf(value):
+                    return 0.0
+                return float(value)
+            return None
+
+        if isinstance(performance_df, pd.DataFrame):
+            structure_keys = [
+                'industry_hhi',
+                'top_industry_weight',
+                'industry_count',
+                'effective_positions',
+                'max_single_weight',
+                'normalized_entropy',
+                'weight_entropy',
+                'gini_coefficient',
+                'industry_rotation',
+            ]
+            for key in structure_keys:
+                value = to_float(structure_info.get(key)) if isinstance(structure_info, dict) else None
+                if value is not None:
+                    performance_df.loc[key, 'value'] = value
+
+            trading_mapping = [
+                ('total_turnover', 'total_turnover'),
+                ('average_daily_turnover', 'average_daily_turnover'),
+                ('trade_count', 'trade_count'),
+                ('round_trip_count', 'round_trip_count'),
+                ('avg_holding_days', 'avg_holding_days'),
+                ('median_holding_days', 'median_holding_days'),
+                ('max_holding_days', 'max_holding_days'),
+                ('win_rate', 'round_trip_win_rate'),
+                ('payoff_ratio', 'payoff_ratio'),
+                ('expectancy', 'expectancy'),
+                ('average_gain', 'average_gain'),
+                ('average_loss', 'average_loss'),
+            ]
+            for source_key, target_key in trading_mapping:
+                value = to_float(trading_info.get(source_key)) if isinstance(trading_info, dict) else None
+                if value is not None:
+                    performance_df.loc[target_key, 'value'] = value
+
+            risk_keys = [
+                'sortino_ratio',
+                'downside_deviation',
+                'tail_ratio',
+                'ulcer_index',
+                'skewness',
+                'kurtosis',
+                'return_count',
+            ]
+            for key in risk_keys:
+                value = to_float(extended_risk_info.get(key)) if isinstance(extended_risk_info, dict) else None
+                if value is not None:
+                    performance_df.loc[key, 'value'] = value
+
+        def sanitize_value(value: Any):
+            if isinstance(value, dict):
+                return sanitize_mapping(value)
+            if isinstance(value, (float, np.floating)):
+                return 0.0 if np.isnan(value) or np.isinf(value) else float(value)
+            if isinstance(value, (int, np.integer)):
+                return int(value)
+            if isinstance(value, (pd.Timestamp, datetime, date)):
+                return value.isoformat()
+            if isinstance(value, (list, tuple, set)):
+                return [sanitize_value(item) for item in value]
+            return value
+
+        def sanitize_mapping(payload: Dict[str, Any]) -> Dict[str, Any]:
+            if not isinstance(payload, dict):
+                return {}
+
+            sanitized: Dict[str, Any] = {}
+            for key, value in payload.items():
+                sanitized[key] = sanitize_value(value)
+            return sanitized
+
+        detailed_metrics['structure_metrics'] = sanitize_mapping(structure_info)
+        detailed_metrics['trading_metrics'] = sanitize_mapping(trading_info)
+        detailed_metrics['extended_risk_metrics'] = sanitize_mapping(extended_risk_info)
+
+        metrics['detailed_metrics'] = detailed_metrics
+        if isinstance(performance_df, pd.DataFrame):
+            metrics['performance_df'] = performance_df
+
+        return metrics
     
     def calculate_alpha_beta(self, strategy_returns: np.ndarray, benchmark_returns: np.ndarray) -> Tuple[float, float]:
         """计算Alpha和Beta"""
@@ -1227,6 +1381,13 @@ class AnalysisBuilder:
             "max_drawdown": max_drawdown,
             "annual_return": annual_return,
         }
+        # 行业集中度若在 performance 中则补充
+        if "industry_hhi" in performance_df.index:
+            risk_metrics["industry_hhi"] = performance_df.loc["industry_hhi", "value"]
+        if "top_industry_weight" in performance_df.index:
+            risk_metrics["top_industry_weight"] = performance_df.loc["top_industry_weight", "value"]
+        if "industry_count" in performance_df.index:
+            risk_metrics["industry_count"] = performance_df.loc["industry_count", "value"]
 
         return {
             "drawdown_series": drawdown_series,

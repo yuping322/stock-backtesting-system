@@ -35,8 +35,9 @@ class TestMainFactor(unittest.TestCase):
         self.assertEqual(result_dict['level'], '优秀')
     
     def test_save_results(self):
-        """测试结果保存功能"""
-        from main_factor import save_results, FactorTestResult
+        """测试结果保存功能（使用 generate_summary_report 替代）"""
+        from main_factor import generate_summary_report
+        from factor.factor import FactorTestResult
         
         # 创建测试结果
         result1 = FactorTestResult()
@@ -59,7 +60,20 @@ class TestMainFactor(unittest.TestCase):
         
         # 创建临时目录
         with tempfile.TemporaryDirectory() as tmpdir:
-            save_results(tmpdir, test_results)
+            # 构造最小 cfg/args
+            from types import SimpleNamespace
+            cfg = SimpleNamespace(
+                START='2024-01-01',
+                END='2024-12-31',
+                STOCK_POOL='HS300',
+                QUANTILES=10,
+                PERIODS=[5, 10],
+                ROLL_WIN=60,
+                FACTORS=['VOL10']
+            )
+            args = SimpleNamespace()
+            # 生成汇总报告
+            generate_summary_report(tmpdir, test_results, cfg, args)
             
             # 检查文件是否存在
             summary_file = Path(tmpdir) / 'summary.csv'

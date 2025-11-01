@@ -1,0 +1,37 @@
+{
+  "best_model": "LightGBM",
+  "all_scores": {
+    "DecisionTree": {
+      "accuracy": 0.684567901234568,
+      "auc": 0.7556685972666768
+    },
+    "RandomForest": {
+      "accuracy": 0.7405349794238683,
+      "auc": 0.8313197513929109
+    },
+    "LightGBM": {
+      "accuracy": 0.8506172839506174,
+      "auc": 0.9227362021372081
+    }
+  },
+  "feature_count": 10,
+  "sample_count": 4860,
+  "train_date_range": "2025-10-15 ~ 2025-10-24",
+  "stock_pool": "small",
+  "percent_select": [
+    0.3,
+    0.3
+  ],
+  "factors": [
+    "sales_growth",
+    "operating_revenue_growth_rate",
+    "total_profit_growth_rate",
+    "operating_cost_ttm",
+    "total_operating_revenue_ttm",
+    "gross_profit_ttm",
+    "cashflow_per_share_ttm",
+    "cash_flow_to_price_ratio",
+    "market_cap",
+    "raw_beta"
+  ]
+}

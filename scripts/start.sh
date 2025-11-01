@@ -29,6 +29,6 @@ mkdir -p logs data
 
 # 运行Streamlit应用
 echo "启动Streamlit应用..."
-streamlit run integrated_backtesting_system.py --server.port 8501 --server.address 0.0.0.0
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
 echo "应用启动完成"

@@ -6,10 +6,12 @@ This script lets you execute a backtest without launching the Streamlit UI.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from numbers import Number
 
 import pandas as pd
 
@@ -180,15 +182,156 @@ def _print_summary(system_config: SystemConfig, result: BacktestResult) -> None:
         last_date = strategy_nav.index.max().strftime("%Y-%m-%d")
         print(f"Date range: {first_date} -> {last_date}")
 
-    print("\nPerformance metrics:")
-    for metric, row in result.performance.iterrows():
-        value = row["value"]
-        if metric in {"total_return", "annual_return", "max_drawdown", "volatility", "win_rate", "benchmark_annual_return"}:
-            print(f"  {metric:>24}: {value:.2%}")
-        elif metric in {"sharpe_ratio", "alpha", "beta"}:
-            print(f"  {metric:>24}: {value:.3f}")
-        else:
-            print(f"  {metric:>24}: {value}")
+    def _is_number(val: object) -> bool:
+        return isinstance(val, Number)
+
+    def _fmt_percent(val: Optional[float]) -> str:
+        if val is None or pd.isna(val):
+            return "n/a"
+        return f"{float(val):.2%}"
+
+    def _fmt_ratio(val: Optional[float]) -> str:
+        if val is None or pd.isna(val):
+            return "n/a"
+        return f"{float(val):.3f}"
+
+    performance_df = result.performance if isinstance(result.performance, pd.DataFrame) else pd.DataFrame()
+    if performance_df.empty:
+        print("\nPerformance metrics: <none>")
+    else:
+        print("\nPerformance metrics:")
+        percent_keys = {
+            "total_return",
+            "annual_return",
+            "max_drawdown",
+            "volatility",
+            "win_rate",
+            "benchmark_annual_return",
+            "industry_hhi",
+            "top_industry_weight",
+            "industry_rotation",
+            "total_turnover",
+            "average_daily_turnover",
+            "round_trip_win_rate",
+            "downside_deviation",
+            "ulcer_index",
+        }
+        ratio_keys = {
+            "sharpe_ratio",
+            "alpha",
+            "beta",
+            "payoff_ratio",
+            "expectancy",
+            "sortino_ratio",
+            "tail_ratio",
+            "gini_coefficient",
+        }
+        integer_keys = {"trade_count", "round_trip_count", "return_count"}
+
+        for metric, row in performance_df.iterrows():
+            value = row.get("value")
+            if not _is_number(value):
+                print(f"  {metric:>24}: {value}")
+                continue
+
+            if metric in percent_keys:
+                formatted = _fmt_percent(value)
+            elif metric in ratio_keys:
+                formatted = _fmt_ratio(value)
+            elif metric in integer_keys:
+                formatted = f"{int(value)}"
+            else:
+                formatted = f"{float(value):.3f}" if not pd.isna(value) else "n/a"
+
+            print(f"  {metric:>24}: {formatted}")
+
+    structure_metrics = result.detailed_metrics.get("structure_metrics", {}) if isinstance(result.detailed_metrics, dict) else {}
+    trading_metrics = result.detailed_metrics.get("trading_metrics", {}) if isinstance(result.detailed_metrics, dict) else {}
+    extended_risk_metrics = result.detailed_metrics.get("extended_risk_metrics", {}) if isinstance(result.detailed_metrics, dict) else {}
+
+    def _print_section(title: str):
+        print(f"\n{title}:")
+
+    if structure_metrics:
+        _print_section("Structure metrics")
+        for key in [
+            "effective_positions",
+            "max_single_weight",
+            "normalized_entropy",
+            "industry_hhi",
+            "top_industry_weight",
+            "industry_rotation",
+            "industry_count",
+        ]:
+            if key not in structure_metrics:
+                continue
+            val = structure_metrics.get(key)
+            if key in {"max_single_weight", "industry_hhi", "top_industry_weight", "industry_rotation"}:
+                formatted = _fmt_percent(val)
+            elif key == "normalized_entropy":
+                formatted = _fmt_ratio(val)
+            else:
+                formatted = f"{val}" if not pd.isna(val) else "n/a"
+            print(f"  {key:>24}: {formatted}")
+
+        weights = structure_metrics.get("industry_weights") if isinstance(structure_metrics.get("industry_weights"), dict) else {}
+        if weights:
+            top_weights = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)[:5]
+            weight_str = ", ".join(f"{code}:{_fmt_percent(w)}" for code, w in top_weights)
+            print(f"  {'industry_weights':>24}: {weight_str}")
+
+    if trading_metrics:
+        _print_section("Trading metrics")
+        for key in [
+            "total_turnover",
+            "average_daily_turnover",
+            "trade_count",
+            "round_trip_count",
+            "round_trip_win_rate",
+            "avg_holding_days",
+            "median_holding_days",
+            "max_holding_days",
+            "payoff_ratio",
+            "expectancy",
+        ]:
+            val = trading_metrics.get(key)
+            if val is None and key == "round_trip_win_rate":
+                val = trading_metrics.get("win_rate")
+            if val is None:
+                continue
+            if key in {"total_turnover", "average_daily_turnover", "round_trip_win_rate"}:
+                formatted = _fmt_percent(val)
+            elif key in {"payoff_ratio", "expectancy"}:
+                formatted = _fmt_ratio(val)
+            elif key in {"trade_count", "round_trip_count"}:
+                formatted = f"{int(val)}"
+            else:
+                formatted = f"{float(val):.2f}" if not pd.isna(val) else "n/a"
+            print(f"  {key:>24}: {formatted}")
+
+    if extended_risk_metrics:
+        _print_section("Extended risk metrics")
+        for key in [
+            "sortino_ratio",
+            "downside_deviation",
+            "tail_ratio",
+            "ulcer_index",
+            "skewness",
+            "kurtosis",
+            "return_count",
+        ]:
+            if key not in extended_risk_metrics:
+                continue
+            val = extended_risk_metrics.get(key)
+            if key in {"downside_deviation", "ulcer_index"}:
+                formatted = _fmt_percent(val)
+            elif key in {"sortino_ratio", "tail_ratio", "skewness", "kurtosis"}:
+                formatted = _fmt_ratio(val)
+            elif key == "return_count":
+                formatted = f"{int(val)}"
+            else:
+                formatted = f"{val}"
+            print(f"  {key:>24}: {formatted}")
 
 
 def _persist_results(result_dir: Path, result: BacktestResult) -> None:
@@ -197,7 +340,25 @@ def _persist_results(result_dir: Path, result: BacktestResult) -> None:
     perf_path = result_dir / "performance_metrics.csv"
     result.strategy_nav.to_csv(nav_path)
     result.performance.to_csv(perf_path)
+    extra_metrics = {}
+    if isinstance(result.detailed_metrics, dict):
+        extra_metrics = {
+            key: result.detailed_metrics.get(key, {})
+            for key in [
+                "structure_metrics",
+                "trading_metrics",
+                "extended_risk_metrics",
+            ]
+        }
+    if extra_metrics:
+        extra_path = result_dir / "additional_metrics.json"
+        with extra_path.open("w", encoding="utf-8") as fh:
+            json.dump(extra_metrics, fh, ensure_ascii=False, indent=2)
+    else:
+        extra_path = None
     print(f"\n结果已保存至: {nav_path} 和 {perf_path}")
+    if extra_path:
+        print(f"附加指标已保存至: {extra_path}")
 
 
 def _resolve_output_dir(user_dir: Optional[str], data_file: str) -> Path:
@@ -300,6 +461,79 @@ def build_markdown_report(
     lines.append(f"- VaR 95%: {_fmt_pct(risk_metrics.get('var_95'))}")
     lines.append(f"- CVaR 95%: {_fmt_pct(risk_metrics.get('cvar_95'))}")
     lines.append("")
+
+    structure_metrics = {}
+    trading_metrics = {}
+    extended_risk_metrics = {}
+    if isinstance(result.detailed_metrics, dict):
+        structure_metrics = result.detailed_metrics.get("structure_metrics", {}) or {}
+        trading_metrics = result.detailed_metrics.get("trading_metrics", {}) or {}
+        extended_risk_metrics = result.detailed_metrics.get("extended_risk_metrics", {}) or {}
+
+    if structure_metrics:
+        lines.append("## Portfolio Structure")
+        lines.append("")
+        structure_rows = [
+            ("Effective positions", structure_metrics.get("effective_positions")),
+            ("Max single weight", _fmt_pct(structure_metrics.get("max_single_weight"))),
+            ("Industry HHI", _fmt_pct(structure_metrics.get("industry_hhi"))),
+            ("Top industry weight", _fmt_pct(structure_metrics.get("top_industry_weight"))),
+            ("Industry rotation", _fmt_pct(structure_metrics.get("industry_rotation"))),
+            ("Industry count", structure_metrics.get("industry_count")),
+            ("Normalized entropy", _fmt_float(structure_metrics.get("normalized_entropy"))),
+            ("Gini coefficient", _fmt_float(structure_metrics.get("gini_coefficient"))),
+        ]
+        for label, value in structure_rows:
+            if value is None or (isinstance(value, str) and not value):
+                continue
+            lines.append(f"- {label}: {value}")
+
+        weights = structure_metrics.get("industry_weights")
+        if isinstance(weights, dict) and weights:
+            lines.append("- Industry weights:")
+            top_weights = sorted(weights.items(), key=lambda kv: kv[1], reverse=True)
+            for code, weight in top_weights[:10]:
+                lines.append(f"  - {code}: {_fmt_pct(weight)}")
+        lines.append("")
+
+    if trading_metrics:
+        lines.append("## Trading Activity")
+        lines.append("")
+        trading_rows = [
+            ("Total turnover", _fmt_pct(trading_metrics.get("total_turnover"))),
+            ("Average daily turnover", _fmt_pct(trading_metrics.get("average_daily_turnover"))),
+            ("Trade count", trading_metrics.get("trade_count")),
+            ("Round trip count", trading_metrics.get("round_trip_count")),
+            ("Round trip win rate", _fmt_pct(trading_metrics.get("round_trip_win_rate"))),
+            ("Average holding days", trading_metrics.get("avg_holding_days")),
+            ("Median holding days", trading_metrics.get("median_holding_days")),
+            ("Max holding days", trading_metrics.get("max_holding_days")),
+            ("Payoff ratio", _fmt_float(trading_metrics.get("payoff_ratio"))),
+            ("Expectancy", _fmt_float(trading_metrics.get("expectancy"))),
+        ]
+        for label, value in trading_rows:
+            if value is None or (isinstance(value, str) and not value):
+                continue
+            lines.append(f"- {label}: {value}")
+        lines.append("")
+
+    if extended_risk_metrics:
+        lines.append("## Extended Risk Metrics")
+        lines.append("")
+        extended_rows = [
+            ("Sortino ratio", _fmt_float(extended_risk_metrics.get("sortino_ratio"))),
+            ("Downside deviation", _fmt_pct(extended_risk_metrics.get("downside_deviation"))),
+            ("Tail ratio", _fmt_float(extended_risk_metrics.get("tail_ratio"))),
+            ("Ulcer index", _fmt_pct(extended_risk_metrics.get("ulcer_index"))),
+            ("Skewness", _fmt_float(extended_risk_metrics.get("skewness"))),
+            ("Kurtosis", _fmt_float(extended_risk_metrics.get("kurtosis"))),
+            ("Return samples", extended_risk_metrics.get("return_count")),
+        ]
+        for label, value in extended_rows:
+            if value is None or (isinstance(value, str) and not value):
+                continue
+            lines.append(f"- {label}: {value}")
+        lines.append("")
 
     lines.append("## Period Performance")
     lines.append("")

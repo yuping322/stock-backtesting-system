@@ -7,6 +7,8 @@
 - `factor.py`: 主程序文件
 - `factor_calculator.py`: 因子计算器接口（支持自定义因子）
 - `example_custom_factor.py`: 自定义因子使用示例
+- `export_data.py`: **数据导出工具**（导出价格和因子数据用于其他平台建模）
+- `export_example.py`: 数据导出使用示例
 - `docs/factor_command_line.md`: 命令行使用详细文档
 - `docs/factor_refactoring_summary.md`: 重构总结文档
 
@@ -149,6 +151,75 @@ python factor/example_custom_factor.py --example 5  # 从文件加载
 
 更多详情参见 `factor_calculator.py`
 
+## 数据导出功能
+
+如果你需要在其他平台进行建模和测试，可以使用 `export_data.py` 导出价格和因子数据。
+
+### 快速开始
+
+```bash
+# 导出最近3个月的数据（自动计算日期范围）
+python factor/export_data.py --stocks 000001 000002 600000 --factors VOL10 VSTD10
+
+# 指定日期范围
+python factor/export_data.py --stocks 000001 000002 --factors VOL10 \
+    --start 2024-01-01 --end 2024-03-31
+
+# 指定输出目录
+python factor/export_data.py --stocks 000001 --factors VOL10 --output ./my_data
+```
+
+### 导出模式
+
+- `separate`: 分别导出价格数据和因子数据（生成 `price_data.csv` 和 `factor_data.csv`）
+- `combined`: 导出合并的宽表数据（生成 `combined_data.csv`，包含所有字段）
+- `both`: 同时导出分开和合并的数据（默认）
+
+```bash
+# 只导出合并数据
+python factor/export_data.py --stocks 000001 --factors VOL10 --mode combined
+```
+
+### 输出文件格式
+
+**price_data.csv**: 
+- 列：`date`, `code`, `open`, `high`, `low`, `close`, `volume`, `amount`, ...
+- 格式：长格式（每行一个日期+股票+字段值的组合）
+
+**factor_data.csv**:
+- 列：`date`, `code`, `因子1`, `因子2`, ...
+- 格式：宽格式（每个因子一列）
+
+**combined_data.csv**:
+- 列：`date`, `code`, `open`, `high`, `low`, `close`, `volume`, `因子1`, `因子2`, ...
+- 格式：宽格式（所有数据在一张表中）
+
+### 使用示例
+
+查看 `export_example.py` 了解详细的用法示例：
+
+```bash
+python factor/export_example.py
+```
+
+或在 Python 代码中直接调用：
+
+```python
+from export_data import export_combined_data, get_last_3_months
+
+# 获取最近3个月的日期范围
+start_date, end_date = get_last_3_months()
+
+# 导出数据
+export_combined_data(
+    codes=['000001', '000002', '600000'],
+    factors=['VOL10', 'VSTD10'],
+    start_date=start_date,
+    end_date=end_date,
+    output_dir='./exported_data'
+)
+```
+
 ## 更多信息
 
 - [详细使用文档](../docs/factor_command_line.md)
@@ -156,5 +227,3 @@ python factor/example_custom_factor.py --example 5  # 从文件加载
 - [自定义因子接口](../docs/factor_custom_factors.md)
 - [从文件加载因子](../docs/factor_file_loading.md)
 - [测试文档](../docs/factor_testing.md)
-
-tests 里面写，从@data.py 里读到的因子 日期是最近三个月时间，不用画图。跑出来的结果存起来

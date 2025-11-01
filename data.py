@@ -9,6 +9,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Union, Literal, TypedDict
+import hashlib
 
 import backtrader as bt
 import pandas as pd
@@ -34,6 +35,35 @@ except ImportError:
 
 
 LOGGER = logging.getLogger(__name__)
+
+# ========== 内存缓存机制 ==========
+
+# 全局缓存字典
+_OSS_CACHE: Dict[str, bytes] = {}
+_DF_CACHE: Dict[str, pd.DataFrame] = {}
+
+def _get_cache_key(prefix: str, filename: str) -> str:
+    """生成缓存键"""
+    return f"{prefix}:{filename}"
+
+def _get_from_cache(key: str) -> Optional[bytes]:
+    """从缓存获取数据"""
+    return _OSS_CACHE.get(key)
+
+def _put_to_cache(key: str, data: bytes):
+    """将数据放入缓存"""
+    _OSS_CACHE[key] = data
+    # 限制缓存大小，避免内存爆炸
+    if len(_OSS_CACHE) > 1000:
+        # 删除最旧的缓存
+        _OSS_CACHE.pop(next(iter(_OSS_CACHE)), None)
+
+def clear_cache():
+    """清空缓存"""
+    global _OSS_CACHE, _DF_CACHE
+    _OSS_CACHE.clear()
+    _DF_CACHE.clear()
+    LOGGER.info("缓存已清空")
 
 
 class FactorResultRow(TypedDict, total=False):
@@ -200,8 +230,9 @@ NO_SUCH_KEY_ERROR = getattr(OSS_EXCEPTIONS, "NoSuchKey", FileNotFoundError)
 OSS_GENERIC_ERROR = getattr(OSS_EXCEPTIONS, "OssError", Exception)
 
 
+
 _OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID")
-_OSS_ACCESS_KEY_SECRET = os.getenv("OSS_ACCESS_KEY_SECRET")
+_OSS_ACCESS_KEY_SECRET =  os.getenv("OSS_ACCESS_KEY_SECRET")
 _OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
 _OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "test123432")
 
@@ -336,7 +367,21 @@ def load_oss_stocks(
     for code in normalized_codes:
         try:
             fname = _ensure_exchange_prefix(code) + ".csv"
-            content = bucket.get_object(prefix + fname).read()
+            object_name = prefix + fname
+            
+            # 尝试从缓存获取
+            cache_key = _get_cache_key("daily_data", object_name)
+            content = _get_from_cache(cache_key)
+            
+            if content is None:
+                # 缓存未命中，从OSS读取
+                content = bucket.get_object(object_name).read()
+                # 存入缓存
+                _put_to_cache(cache_key, content)
+                LOGGER.debug("缓存未命中，从OSS读取: %s", object_name)
+            else:
+                LOGGER.debug("缓存命中: %s", object_name)
+                
         except NO_SUCH_KEY_ERROR:
             LOGGER.warning("OSS 未找到股票 %s 的日线数据", code)
             continue
@@ -759,8 +804,20 @@ def read_factor_data(
             continue
 
         try:
-            result = bucket.get_object(object_name)
-            df = pd.read_csv(result, index_col=0)
+            # 尝试从缓存获取
+            cache_key = _get_cache_key("factor_data", object_name)
+            cached_df = _DF_CACHE.get(cache_key)
+            
+            if cached_df is not None:
+                LOGGER.debug("因子数据缓存命中: %s", object_name)
+                df = cached_df.copy()
+            else:
+                # 缓存未命中，从OSS读取
+                result = bucket.get_object(object_name)
+                df = pd.read_csv(result, index_col=0)
+                # 存入缓存
+                _DF_CACHE[cache_key] = df
+                LOGGER.debug("因子数据缓存未命中，从OSS读取: %s", object_name)
         except Exception as e:
             print(f"读取失败 {object_name}: {e}")
             continue
@@ -1115,10 +1172,12 @@ def _load_index_df(index_symbol: str) -> pd.DataFrame:
             df = pd.read_csv(io.BytesIO(content), dtype=str)
             
             # 重命名列
-            rename = {"品种代码": "code", "纳入日期": "in_date"}
+            rename = {"品种代码": "code", "纳入日期": "in_date", "指数纳入日期": "in_date"}
             df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
             
             # 手动转换日期，避免pandas的重复键问题
+            if "in_date" not in df.columns:
+                raise KeyError("缺少 in_date 列，请检查指数文件表头")
             date_col = df["in_date"].copy()
             df["in_date"] = pd.Series([pd.to_datetime(d, errors="coerce") for d in date_col])
             
@@ -2022,3 +2081,83 @@ def load_code2name():
 code2name = None
 if code2name is None:
     code2name = load_code2name()
+
+INDUSTRY_CSV_PATH = os.path.join(os.path.dirname(__file__), "config", "industry_category.csv")
+_industry_df = None
+
+
+def get_industry_category(codes: Union[str, int, Iterable[Union[str, int]]]) -> Union[str, dict, None]:
+    """
+    获取股票行业板块。支持多种股票代码输入格式。
+    单个代码返回一个字符串，多代码返回 dict。
+    没找到行业返回 None。
+    """
+    global _industry_df
+    if _industry_df is None:
+        _industry_df = pd.read_csv(INDUSTRY_CSV_PATH)
+        _industry_df["code"] = _industry_df["code"].str.strip().str.upper()
+        _industry_df.set_index("code", inplace=True)
+    
+    def query(code):
+        suffix_code = _ensure_exchange_suffix(code)
+        return _industry_df["category"].get(suffix_code, None)
+
+    # 统一规范：返回中的股票代码一律为6位数字字符串
+    normalized = _normalize_code_arg(codes, allow_none=False)
+
+    if isinstance(codes, (str, int)):
+        return query(normalized[0])
+    else:
+        result = {}
+        for code6 in normalized:
+            result[code6] = query(code6)
+        return result
+
+
+# 概念板块（一个代码可对应多个概念）
+CONCEPT_CSV_PATH = os.path.join(os.path.dirname(__file__), "config", "concept_category.csv")
+_concept_df = None
+
+
+def get_concept_categories(codes: Union[str, int, Iterable[Union[str, int]]]) -> Union[List[str], Dict[str, List[str]]]:
+    """
+    获取股票概念板块（一个股票可能对应多个概念）。
+
+    - 入参支持多种股票代码格式（6位、带前缀 sh/sz/bj、带后缀 .XSHG/.XSHE/.XBJ）。
+    - 单个代码返回 List[str]（概念列表，按文件顺序去重）。
+    - 多个代码返回 Dict[str, List[str]]，字典 key 统一为 6 位数字字符串。
+    - 若某代码无概念，返回空列表。
+    """
+    global _concept_df
+    if _concept_df is None:
+        df = pd.read_csv(CONCEPT_CSV_PATH)
+        # 规范列名与数据形态
+        df.columns = [c.strip().lower() for c in df.columns]
+        # 仅保留必要列
+        if not {"code", "category"}.issubset(df.columns):
+            raise ValueError("concept_category.csv 需包含 'code','category' 列")
+        df["code"] = df["code"].astype(str).str.strip().str.upper()
+        df["category"] = df["category"].astype(str).str.strip()
+        _concept_df = df
+
+    normalized = _normalize_code_arg(codes, allow_none=False)
+
+    def lookup(norm_code: str) -> List[str]:
+        suffix_code = _ensure_exchange_suffix(norm_code)
+        rows = _concept_df[_concept_df["code"] == suffix_code]["category"].tolist()
+        # 去重，保顺序
+        seen = set()
+        result: List[str] = []
+        for item in rows:
+            if item not in seen and item:
+                seen.add(item)
+                result.append(item)
+        return result
+
+    if isinstance(codes, (str, int)):
+        return lookup(normalized[0])
+    else:
+        out: Dict[str, List[str]] = {}
+        for norm_code in normalized:
+            out[norm_code] = lookup(norm_code)
+        return out

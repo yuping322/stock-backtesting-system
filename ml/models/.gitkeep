@@ -1,0 +1,6 @@
+# 模型文件目录
+# 训练后会生成以下文件：
+# - super_factor_model.txt - LightGBM模型
+# - ic_weights.parquet - IC权重历史
+# - model_info.json - 模型配置信息
+

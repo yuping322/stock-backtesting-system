@@ -48,8 +48,6 @@ def compare_interfaces():
     interfaces = [
         'load_new_stocks',
         'load_oss_stocks',
-        'load_modelscope_stocks',
-        'load_modelscope_complex_stocks',
         'read_factor_data',
         'read_factor_data_loal',
         'factor_for_al',

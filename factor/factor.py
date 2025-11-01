@@ -540,28 +540,50 @@ class FactorTester:
             print(f'[get_price失败] 耗时: {elapsed:.2f}秒 - 错误: {e}')
             return pd.DataFrame()
 
-    # ---------- 取行业 ----------
+    # ---------- 取行业/概念分组 ----------
     def get_industry_series(self):
         import time
         start_time = time.time()
         print(f'[get_industry开始] 正在拉取行业... - {time.strftime("%H:%M:%S")}')
-        
-        ind_dict = {}
-        # 注意：data.py 中没有直接的行业数据接口
-        # 这里使用占位符，将所有股票归为同一行业
-        # 如果需要真实的行业数据，需要额外实现或使用其他数据源
-        
-        # 获取交易日历
+
+        # 获取交易日历（按日展开标签）
         dates = pd.date_range(self.cfg.START, self.cfg.END, freq='D')
-        
-        for code in self._get_stocks_for_calculation():
-            ind_code = 'Other'  # 占位符行业
+
+        stocks = self._get_stocks_for_calculation()
+
+        # 优先用概念主标签，其次行业，没有则 Other
+        try:
+            concept_map = data.get_concept_categories(stocks)
+        except Exception:
+            concept_map = {s: [] for s in stocks}
+        try:
+            industry_map = data.get_industry_category(stocks)
+        except Exception:
+            industry_map = {s: None for s in stocks}
+
+        def pick_group(code: str) -> str:
+            concepts = []
+            if isinstance(concept_map, dict):
+                concepts = concept_map.get(code, []) or []
+            # 取第一个概念作为主标签
+            if concepts:
+                return str(concepts[0])
+            # 回退行业
+            if isinstance(industry_map, dict):
+                ind = industry_map.get(code)
+                if ind:
+                    return str(ind)
+            return 'Other'
+
+        group_dict = {}
+        for code in stocks:
+            grp = pick_group(code)
             for d in dates:
-                ind_dict[(pd.Timestamp(d), code)] = ind_code
-        
+                group_dict[(pd.Timestamp(d), code)] = grp
+
         elapsed = time.time() - start_time
         print(f'[get_industry完成] 耗时: {elapsed:.2f}秒')
-        return pd.Series(ind_dict, name='group')
+        return pd.Series(group_dict, name='group')
 
     # ---------- 主流程 ----------
     def run(self, plot=False):

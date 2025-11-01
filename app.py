@@ -120,10 +120,22 @@ def main():
         
         # 指标选择
         if CONFIG_AVAILABLE:
+            available_metrics = list_metrics()
+            default_metrics = [
+                'total_return',
+                'annual_return',
+                'max_drawdown',
+                'sharpe_ratio',
+                'win_rate',
+                'industry_hhi',
+                'total_turnover',
+                'round_trip_win_rate',
+                'sortino_ratio',
+            ]
             selected_metrics = st.multiselect(
                 "选择显示指标",
-                list_metrics(),
-                default=['total_return', 'annual_return', 'max_drawdown', 'sharpe_ratio', 'win_rate']
+                available_metrics,
+                default=[metric for metric in default_metrics if metric in available_metrics]
             )
         else:
             selected_metrics = ["total_return", "annual_return", "max_drawdown", "sharpe_ratio"]
@@ -217,6 +229,16 @@ def display_results(
     show_trade_history: bool,
 ):
     """显示回测结果"""
+    def _fmt_pct(value):
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.2%}"
+
+    def _fmt_ratio(value, decimals: int = 3):
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.{decimals}f}"
+
     st.header("📊 回测结果")
 
     st.subheader("📋 综合摘要")
@@ -232,16 +254,29 @@ def display_results(
         max_drawdown = perf_df.loc["max_drawdown", "value"] if "max_drawdown" in perf_df.index else 0
         sharpe_ratio = perf_df.loc["sharpe_ratio", "value"] if "sharpe_ratio" in perf_df.index else 0
 
+        industry_hhi = perf_df.loc["industry_hhi", "value"] if "industry_hhi" in perf_df.index else None
+        total_turnover = perf_df.loc["total_turnover", "value"] if "total_turnover" in perf_df.index else None
+        round_trip_win = None
+        if "round_trip_win_rate" in perf_df.index:
+            round_trip_win = perf_df.loc["round_trip_win_rate", "value"]
+        elif "win_rate" in perf_df.index:
+            round_trip_win = perf_df.loc["win_rate", "value"]
+        sortino_ratio = perf_df.loc["sortino_ratio", "value"] if "sortino_ratio" in perf_df.index else None
+
         summary_rows.append(
             {
                 "文件名": file_name,
                 "策略": strategy_name,
                 "初始资金": f"{initial_cash:,.0f}",
                 "最终资金": f"{final_value:,.0f}",
-                "总收益率": f"{return_rate:.2%}",
-                "年化收益率": f"{annual_return:.2%}",
-                "最大回撤": f"{max_drawdown:.2%}",
-                "夏普比率": f"{sharpe_ratio:.3f}",
+                "总收益率": _fmt_pct(return_rate),
+                "年化收益率": _fmt_pct(annual_return),
+                "最大回撤": _fmt_pct(max_drawdown),
+                "夏普比率": _fmt_ratio(sharpe_ratio),
+                "行业HHI": _fmt_pct(industry_hhi),
+                "总换手率": _fmt_pct(total_turnover),
+                "RoundTrip胜率": _fmt_pct(round_trip_win),
+                "Sortino": _fmt_ratio(sortino_ratio),
                 "有效股票数": result.get("valid_stocks", 0),
             }
         )
@@ -276,6 +311,16 @@ def display_detailed_analysis(
     """显示详细分析"""
     # 转换为BacktestResult对象以使用新的方法
     result_obj = BacktestResult.from_dict(result)
+
+    def fmt_pct(value, decimals: int = 2):
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.{decimals}%}"
+
+    def fmt_ratio(value, decimals: int = 3):
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.{decimals}f}"
 
     strategy_nav: pd.Series = result.get("strategy_nav")
     benchmark_nav: pd.Series = result.get("benchmark_nav")
@@ -338,6 +383,70 @@ def display_detailed_analysis(
                             st.metric(metric_name, f"{value:.3f}")
                     else:
                         st.metric(metric_name, f"{value:.3f}")
+
+        structure_metrics = {}
+        trading_metrics = {}
+        extended_metrics = {}
+        if isinstance(result_obj.detailed_metrics, dict):
+            structure_metrics = result_obj.detailed_metrics.get("structure_metrics", {}) or {}
+            trading_metrics = result_obj.detailed_metrics.get("trading_metrics", {}) or {}
+            extended_metrics = result_obj.detailed_metrics.get("extended_risk_metrics", {}) or {}
+
+        if structure_metrics:
+            with st.expander("🧱 结构指标", expanded=False):
+                struct_rows = [
+                    {"指标": "有效持仓数", "数值": fmt_ratio(structure_metrics.get("effective_positions"), 2)},
+                    {"指标": "最大单一权重", "数值": fmt_pct(structure_metrics.get("max_single_weight"))},
+                    {"指标": "行业HHI", "数值": fmt_pct(structure_metrics.get("industry_hhi"))},
+                    {"指标": "Top行业权重", "数值": fmt_pct(structure_metrics.get("top_industry_weight"))},
+                    {"指标": "行业轮动", "数值": fmt_pct(structure_metrics.get("industry_rotation"))},
+                    {"指标": "行业数量", "数值": structure_metrics.get("industry_count", "-")},
+                    {"指标": "归一化熵", "数值": fmt_ratio(structure_metrics.get("normalized_entropy"), 3)},
+                    {"指标": "基尼系数", "数值": fmt_ratio(structure_metrics.get("gini_coefficient"), 3)},
+                ]
+                st.table(pd.DataFrame(struct_rows))
+
+                weights = structure_metrics.get("industry_weights")
+                if isinstance(weights, dict) and weights:
+                    weight_df = pd.DataFrame(
+                        sorted(weights.items(), key=lambda kv: kv[1], reverse=True),
+                        columns=["行业", "权重"],
+                    )
+                    weight_df["权重"] = weight_df["权重"].apply(fmt_pct)
+                    st.write("**行业权重分布**")
+                    st.dataframe(weight_df, use_container_width=True)
+
+        if trading_metrics:
+            with st.expander("🔄 交易指标", expanded=False):
+                win_rate = trading_metrics.get("round_trip_win_rate")
+                if win_rate is None:
+                    win_rate = trading_metrics.get("win_rate")
+                trading_rows = [
+                    {"指标": "总换手率", "数值": fmt_pct(trading_metrics.get("total_turnover"))},
+                    {"指标": "日均换手率", "数值": fmt_pct(trading_metrics.get("average_daily_turnover"))},
+                    {"指标": "交易笔数", "数值": trading_metrics.get("trade_count", "-")},
+                    {"指标": "RoundTrip数量", "数值": trading_metrics.get("round_trip_count", "-")},
+                    {"指标": "RoundTrip胜率", "数值": fmt_pct(win_rate)},
+                    {"指标": "平均持有天数", "数值": fmt_ratio(trading_metrics.get("avg_holding_days"), 2)},
+                    {"指标": "中位持有天数", "数值": fmt_ratio(trading_metrics.get("median_holding_days"), 2)},
+                    {"指标": "最长持有天数", "数值": fmt_ratio(trading_metrics.get("max_holding_days"), 2)},
+                    {"指标": "盈亏比", "数值": fmt_ratio(trading_metrics.get("payoff_ratio"), 3)},
+                    {"指标": "期望收益", "数值": fmt_ratio(trading_metrics.get("expectancy"), 3)},
+                ]
+                st.table(pd.DataFrame(trading_rows))
+
+        if extended_metrics:
+            with st.expander("⚖️ 扩展风险指标", expanded=False):
+                extended_rows = [
+                    {"指标": "Sortino比率", "数值": fmt_ratio(extended_metrics.get("sortino_ratio"), 3)},
+                    {"指标": "下行波动率", "数值": fmt_pct(extended_metrics.get("downside_deviation"))},
+                    {"指标": "尾部比率", "数值": fmt_ratio(extended_metrics.get("tail_ratio"), 3)},
+                    {"指标": "Ulcer指数", "数值": fmt_pct(extended_metrics.get("ulcer_index"))},
+                    {"指标": "偏度", "数值": fmt_ratio(extended_metrics.get("skewness"), 3)},
+                    {"指标": "峰度", "数值": fmt_ratio(extended_metrics.get("kurtosis"), 3)},
+                    {"指标": "样本数量", "数值": extended_metrics.get("return_count", "-")},
+                ]
+                st.table(pd.DataFrame(extended_rows))
 
     # 净值曲线
     with detail_tabs[1]:
@@ -475,6 +584,10 @@ def display_detailed_analysis(
                     "cvar_95",
                     "information_ratio",
                     "calmar_ratio",
+                    "sortino_ratio",
+                    "downside_deviation",
+                    "tail_ratio",
+                    "ulcer_index",
                 ]
                 rows = []
                 for metric_name in risk_metrics:

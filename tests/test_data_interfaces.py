@@ -24,9 +24,7 @@ try:
         load_new_stocks,
         load_oss_stocks,
         read_factor_data,
-        # ModelScope
-        load_modelscope_stocks,
-        load_modelscope_complex_stocks,
+        # 已移除的旧接口（不再导入）
         # 因子分析
         factor_for_al,
         # 财务报表
@@ -236,22 +234,17 @@ def test_date_range():
         test_result.add_fail("test_date_range", str(e))
 
 
-def test_load_modelscope_stocks():
-    """测试ModelScope数据加载"""
+def test_load_prices_with_oss():
+    """使用 OSS 接口加载行情"""
     try:
         codes = ["000001"]
         start = "2024-01-01"
         end = "2024-01-10"
-        
-        df = load_modelscope_stocks(codes, start=start, end=end)
-        
+        df = load_oss_stocks(codes, start=start, end=end)
         assert isinstance(df, pd.DataFrame)
-        if not df.empty:
-            assert isinstance(df.index, pd.DatetimeIndex)
-        
-        test_result.add_pass("test_load_modelscope_stocks")
+        test_result.add_pass("test_load_prices_with_oss")
     except Exception as e:
-        test_result.add_fail("test_load_modelscope_stocks", str(e))
+        test_result.add_fail("test_load_prices_with_oss", str(e))
 
 
 def test_get_index_stocks():

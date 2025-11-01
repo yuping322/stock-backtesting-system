@@ -144,6 +144,25 @@ PERFORMANCE_METRICS = {
         "format": "{:.2%}",
         "higher_is_better": True
     }
+    ,
+    "industry_hhi": {
+        "name": "行业集中度HHI",
+        "description": "基于持仓权重的行业赫芬达尔指数 (∑w_i^2)，越低越分散",
+        "format": "{:.4f}",
+        "higher_is_better": False
+    },
+    "top_industry_weight": {
+        "name": "最大行业权重",
+        "description": "单一行业权重最高值，越低越分散",
+        "format": "{:.2%}",
+        "higher_is_better": False
+    },
+    "industry_count": {
+        "name": "持仓行业数",
+        "description": "当日持仓涉及的行业数量，越多越分散",
+        "format": "{:d}",
+        "higher_is_better": True
+    }
 }
 
 # =========================

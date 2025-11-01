@@ -57,7 +57,7 @@ AKSHARE_OSS_ACCESS_KEY_SECRET=your_akshare_access_key_secret_here
 
 ```
 /stock-backtesting-system/
-├── integrated_backtesting_system.py    # 集成版回测系统（主文件）
+├── app.py                              # Streamlit 回测界面入口
 ├── backtrader_base_strategy.py         # Backtrader基础策略
 ├── data.py                             # 数据处理模块
 ├── config.py                           # 配置文件
@@ -106,7 +106,7 @@ pip install -r requirements.txt
 ./start.sh
 
 # 方法二：直接运行
-streamlit run integrated_backtesting_system.py
+streamlit run app.py
 ```
 
 ### 3. 配置参数

@@ -1,0 +1,24 @@
+{
+  "factors": [
+    "sales_growth",
+    "operating_revenue_growth_rate",
+    "total_profit_growth_rate",
+    "operating_cost_ttm",
+    "total_operating_revenue_ttm",
+    "gross_profit_ttm",
+    "total_profit_ttm",
+    "net_profit_ttm",
+    "EBITDA",
+    "EBIT",
+    "eps_ttm",
+    "retained_earnings",
+    "cashflow_per_share_ttm",
+    "cash_flow_to_price_ratio",
+    "market_cap",
+    "size",
+    "beta",
+    "MAC20"
+  ],
+  "note": "可根据需要修改此文件添加或删除因子"
+}
+

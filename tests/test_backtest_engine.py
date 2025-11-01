@@ -205,6 +205,10 @@ def test_metrics_with_zero_nav():
     metrics = engine.calculate_detailed_metrics(nav, nav, np.zeros(9))
     for v in metrics['performance_df']['value']:
         assert v == 0.0
+    # 新增行业集中度相关占位指标
+    assert 'industry_hhi' in metrics['performance_df'].index
+    assert 'top_industry_weight' in metrics['performance_df'].index
+    assert 'industry_count' in metrics['performance_df'].index
 
 def test_empty_holdings_and_trades():
     index = pd.date_range("2020-01-02", periods=2, freq="D")

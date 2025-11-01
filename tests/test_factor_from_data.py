@@ -41,6 +41,16 @@ CFG = factor_module.CFG
 FactorTester = factor_module.FactorTester
 parse_args = factor_module.parse_args
 
+# --- Added pytest fixture for factor_names to satisfy test invocation ---
+import pytest
+
+@pytest.fixture
+def factor_names():
+    """Provide a minimal default factor list for test.
+    Chosen basic factors expected to exist; adjust if repository factors differ.
+    """
+    return ['VOL10', 'MA_5']
+
 
 def get_recent_3_months_date_range():
     """获取最近3个月的日期范围"""

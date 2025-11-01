@@ -144,20 +144,25 @@ class TestDataModule(unittest.TestCase):
         self.assertEqual(prices.loc[pd.Timestamp("2020-01-01"), "000001"], 10)
         self.assertEqual(prices.loc[pd.Timestamp("2020-01-02"), "000001"], 11)
 
-    def test_load_modelscope_stocks(self):
-        csv_text = "date,close\n2020-01-01,10\n2020-01-02,11\n"
-        response = SimpleNamespace(content=csv_text.encode("utf-8"), raise_for_status=lambda: None)
-        with patch("data.requests.get", return_value=response):
-            prices = data.load_modelscope_stocks(["000001"], start="2020-01-01", end="2020-01-03")
+    def test_load_prices_oss_like_modelscope(self):
+        # 模拟 modelscope 的场景但走 OSS 接口
+        csv_text = "日期,close\n2020-01-01,10\n2020-01-02,11\n"
+        bucket_stub = BucketStub(object_contents={
+            "hangqing/daily_data/sz000001.csv": csv_text
+        })
+        with patch.object(data, "bucket", bucket_stub):
+            prices = data.load_oss_stocks(["000001"], start="2020-01-01", end="2020-01-03")
         self.assertIn("000001", prices.columns)
         self.assertEqual(prices.loc[pd.Timestamp("2020-01-02"), "000001"], 11)
 
-    def test_load_modelscope_complex_stocks(self):
-        csv_text = "date,open,high,low,close\n2020-01-01,9,11,8,10\n2020-01-02,10,12,9,11\n"
-        response = SimpleNamespace(content=csv_text.encode("utf-8"), raise_for_status=lambda: None)
-        with patch("data.requests.get", return_value=response):
-            close_df = data.load_modelscope_complex_stocks(["000001"], start="2020-01-01", end="2020-01-02")
-            all_fields = data.load_modelscope_complex_stocks(["000001"], fields="all")
+    def test_load_complex_oss_like_modelscope(self):
+        csv_text = "日期,open,high,low,close,volume\n2020-01-01,9,11,8,10,1000\n2020-01-02,10,12,9,11,1200\n"
+        bucket_stub = BucketStub(object_contents={
+            "hangqing/daily_data/sz000001.csv": csv_text
+        })
+        with patch.object(data, "bucket", bucket_stub):
+            close_df = data.load_oss_complex_stocks(["000001"], start="2020-01-01", end="2020-01-02", fields="close")
+            all_fields = data.load_oss_complex_stocks(["000001"], fields="all")
         self.assertEqual(close_df.loc[pd.Timestamp("2020-01-01"), "000001"], 10)
         self.assertIn("open", all_fields)
         expected_open = pd.DataFrame({"000001": [9, 10]}, index=close_df.index)
@@ -379,7 +384,7 @@ class TestDataModule(unittest.TestCase):
         pricing_df = pd.DataFrame({"000001": [10, 10.5]}, index=pd.to_datetime(["2020-01-01", "2020-01-02"]))
 
         with patch("data.factor_for_al", return_value=factor_series), \
-             patch("data.load_modelscope_stocks", return_value=pricing_df), \
+             patch("data.load_oss_stocks", return_value=pricing_df), \
              patch("data.get_clean_factor_and_forward_returns", return_value=pd.DataFrame({"ic": [0.1]})), \
              patch("data.mean_information_coefficient", return_value=pd.Series([0.1])), \
              patch("data.factor_returns", return_value=pd.Series([0.01])), \
@@ -389,6 +394,55 @@ class TestDataModule(unittest.TestCase):
 
         self.assertIn("IC_mean", result)
         mock_save.assert_called_once()
+
+    def test_get_industry_category(self):
+        # 用部分真实 industry_category.csv 内容
+        import builtins
+        import pandas as pd
+        from unittest.mock import patch
+        csv_content = """code,category\n000001.XSHE,股份制银行III\n600000.XSHG,银行II\n300750.XSHE,锂电池III\n"""
+        df = pd.read_csv(io.StringIO(csv_content))
+        df["code"] = df["code"].str.strip().str.upper()
+        df = df.set_index("code")
+        with patch("data._industry_df", df):
+            # 适配多种输入格式
+            self.assertEqual(data.get_industry_category("000001"), "股份制银行III")
+            self.assertEqual(data.get_industry_category("000001.XSHE"), "股份制银行III")
+            self.assertEqual(data.get_industry_category("sz000001"), "股份制银行III")
+            self.assertEqual(data.get_industry_category("600000.XSHG"), "银行II")
+            self.assertEqual(data.get_industry_category(["300750", "600000.XSHG"]), {"300750": "锂电池III", "600000": "银行II"})
+            self.assertIsNone(data.get_industry_category("999999"))
+
+    def test_get_concept_categories(self):
+        # 构造简化版 concept_category.csv 内容
+        csv_content = """code,category,name\n000001.XSHE,证金持股,平安银行\n000001.XSHE,银行概念,平安银行\n600000.XSHG,上证50,浦发银行\n300750.XSHE,锂电池,宁德时代\n"""
+        df = pd.read_csv(io.StringIO(csv_content))
+        df.columns = [c.strip().lower() for c in df.columns]
+        df["code"] = df["code"].str.strip().str.upper()
+
+        # 打补丁注入到 data 模块缓存，避免真实文件读取
+        with patch("data._concept_df", df):
+            # 单个代码，多种输入格式
+            self.assertEqual(
+                data.get_concept_categories("000001"),
+                ["证金持股", "银行概念"]
+            )
+            self.assertEqual(
+                data.get_concept_categories("000001.XSHE"),
+                ["证金持股", "银行概念"]
+            )
+            self.assertEqual(
+                data.get_concept_categories("sz000001"),
+                ["证金持股", "银行概念"]
+            )
+
+            # 多个代码返回 dict，key 统一为 6 位数字
+            res = data.get_concept_categories(["300750", "600000.XSHG"]) 
+            self.assertEqual(res["300750"], ["锂电池"]) 
+            self.assertEqual(res["600000"], ["上证50"]) 
+
+            # 无概念返回空列表
+            self.assertEqual(data.get_concept_categories("999999"), [])
 
 
 if __name__ == "__main__":
