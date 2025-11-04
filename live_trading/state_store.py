@@ -67,3 +67,57 @@ class StateStore:
         if os.path.exists(path):
             return pd.read_csv(path)
         return None
+
+    def save_target_weights(self, df: pd.DataFrame):
+        """Save target weights (code, weight)."""
+        df.to_csv(self._path(self.config.target_weights_file), index=False)
+
+    def load_target_weights(self) -> pd.DataFrame:
+        """Load target weights (code, weight)."""
+        path = self._path(self.config.target_weights_file)
+        if os.path.exists(path):
+            return pd.read_csv(path)
+        return pd.DataFrame(columns=['code', 'weight'])
+
+    def save_orders(self, df: pd.DataFrame):
+        """Save orders (code, side, shares)."""
+        df.to_csv(self._path(self.config.orders_file), index=False)
+
+    def load_orders(self) -> pd.DataFrame:
+        """Load orders (code, side, shares)."""
+        path = self._path(self.config.orders_file)
+        if os.path.exists(path):
+            return pd.read_csv(path)
+        return pd.DataFrame(columns=['code', 'side', 'shares'])
+
+    def save_model_ic(self, df: pd.DataFrame):
+        """Save per-model IC metrics (date, model, ic)."""
+        path = self._path(self.config.model_ic_file)
+        if os.path.exists(path):
+            existing = pd.read_csv(path)
+            df = pd.concat([existing, df], ignore_index=True)
+            df = df.drop_duplicates(subset=['date', 'model'], keep='last')
+        df.to_csv(path, index=False)
+
+    def load_model_ic(self) -> Optional[pd.DataFrame]:
+        """Load per-model IC metrics."""
+        path = self._path(self.config.model_ic_file)
+        if os.path.exists(path):
+            return pd.read_csv(path)
+        return None
+
+    def set_retrain_flag(self):
+        """Create retrain.flag file."""
+        flag_path = self._path(self.config.retrain_flag_file)
+        with open(flag_path, 'w') as f:
+            f.write(f"{datetime.now().isoformat()}\n")
+
+    def clear_retrain_flag(self):
+        """Remove retrain.flag file."""
+        flag_path = self._path(self.config.retrain_flag_file)
+        if os.path.exists(flag_path):
+            os.remove(flag_path)
+
+    def has_retrain_flag(self) -> bool:
+        """Check if retrain.flag exists."""
+        return os.path.exists(self._path(self.config.retrain_flag_file))

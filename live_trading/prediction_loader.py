@@ -12,7 +12,7 @@ from __future__ import annotations
 import glob
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -61,3 +61,59 @@ class PredictionLoader:
         live_df = live_df.groupby(['date', 'code'], as_index=False)['weight'].mean()
 
         return live_df.sort_values(['date', 'weight'], ascending=[True, False]).reset_index(drop=True)
+
+    def load_ensemble(self, date: str, models: List[str], top_n: int = 50) -> pd.DataFrame:
+        """Load ensemble predictions from multiple models for a specific date.
+        
+        Args:
+            date: Date string in YYYYMMDD format (e.g., '20250603')
+            models: List of model directory names (e.g., ['model_a', 'model_b'])
+            top_n: Number of top stocks to select
+            
+        Returns:
+            DataFrame with columns: code, weight (normalized weights, sum to 1)
+        """
+        dfs = []
+        for model in models:
+            model_path = os.path.join(self.config.data_dir, model, f'{date}.csv')
+            if not os.path.exists(model_path):
+                continue
+            try:
+                df = pd.read_csv(model_path, dtype={'code': str})
+                if 'code' not in df.columns or 'score' not in df.columns:
+                    continue
+                df['code'] = df['code'].astype(str).str.zfill(6)
+                df['model'] = model
+                dfs.append(df[['code', 'score', 'model']])
+            except Exception as e:
+                continue
+        
+        if not dfs:
+            return pd.DataFrame(columns=['code', 'weight'])
+        
+        # Concatenate all model predictions
+        df = pd.concat(dfs, ignore_index=True)
+        
+        # Step 1: Score -> Weight: rank(pct=True) - 0.5 (neutralized)
+        df['weight'] = df.groupby('model')['score'].transform(
+            lambda x: x.rank(pct=True) - 0.5
+        )
+        
+        # Step 2: Equal-weight ensemble across models
+        out = df.groupby('code')['weight'].mean().reset_index()
+        
+        # Step 3: Select Top-N with weight >= 0
+        out = out.nlargest(top_n, 'weight')
+        out = out[out['weight'] >= 0].copy()
+        
+        if out.empty:
+            return pd.DataFrame(columns=['code', 'weight'])
+        
+        # Step 4: Normalize to sum to 1
+        total_weight = out['weight'].sum()
+        if total_weight > 0:
+            out['weight'] = out['weight'] / total_weight
+        else:
+            out['weight'] = 1.0 / len(out)
+        
+        return out[['code', 'weight']].sort_values('weight', ascending=False).reset_index(drop=True)

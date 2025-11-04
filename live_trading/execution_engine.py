@@ -74,6 +74,74 @@ class ExecutionEngine:
         seed = int(code) % 1000
         return 10 + (seed / 1000.0) * 30  # price between 10 and 40
 
+    def generate_orders_dataframe(self, current_positions: pd.DataFrame, target_weights: pd.DataFrame, total_equity: float) -> pd.DataFrame:
+        """Generate orders DataFrame with columns: code, side, shares.
+        
+        Args:
+            current_positions: DataFrame with columns: code, weight, avg_price (optional)
+            target_weights: DataFrame with columns: code, weight
+            total_equity: Total equity value for calculating shares
+            
+        Returns:
+            DataFrame with columns: code, side, shares
+        """
+        cur_map = {}
+        if current_positions is not None and not current_positions.empty:
+            for row in current_positions.itertuples():
+                code = str(row.code).zfill(6)
+                weight = row.weight
+                avg_price = getattr(row, 'avg_price', self._mock_price(code))
+                cur_map[code] = {'weight': weight, 'price': avg_price}
+        
+        orders_rows = []
+        
+        # Process target positions
+        for row in target_weights.itertuples():
+            code = str(row.code).zfill(6)
+            tgt_w = row.weight
+            
+            if code in cur_map:
+                cur_w = cur_map[code]['weight']
+                cur_price = cur_map[code]['price']
+                delta_w = tgt_w - cur_w
+            else:
+                cur_w = 0.0
+                cur_price = self._mock_price(code)
+                delta_w = tgt_w
+            
+            if abs(delta_w) < 1e-6:
+                continue
+            
+            if delta_w > 0:
+                side = 'buy'
+                target_value = delta_w * total_equity
+                shares = int(target_value / cur_price / self.config.lot_size) * self.config.lot_size
+            else:
+                side = 'sell'
+                target_value = abs(delta_w) * total_equity
+                # Use current position price for selling
+                if code in cur_map:
+                    shares = int(target_value / cur_map[code]['price'] / self.config.lot_size) * self.config.lot_size
+                else:
+                    shares = 0
+            
+            if shares > 0:
+                orders_rows.append({'code': code, 'side': side, 'shares': shares})
+        
+        # Exit positions not in target
+        for code, pos_info in cur_map.items():
+            if code not in target_weights['code'].values:
+                side = 'sell'
+                target_value = pos_info['weight'] * total_equity
+                shares = int(target_value / pos_info['price'] / self.config.lot_size) * self.config.lot_size
+                if shares > 0:
+                    orders_rows.append({'code': code, 'side': side, 'shares': shares})
+        
+        if orders_rows:
+            return pd.DataFrame(orders_rows)
+        else:
+            return pd.DataFrame(columns=['code', 'side', 'shares'])
+
     def summary(self) -> Dict[str, float]:
         if not self._orders:
             return {}

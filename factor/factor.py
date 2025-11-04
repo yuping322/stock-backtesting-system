@@ -18,6 +18,11 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 添加 factor 目录到路径
 import data
+try:
+    from factor.factor_calculator import FileFactorCalculator
+except ImportError:
+    # 如果作为模块导入失败，尝试直接导入
+    from factor_calculator import FileFactorCalculator
 
 # 导入因子计算器
 from factor_calculator import (
@@ -68,6 +73,8 @@ def parse_args():
     # 因子
     parser.add_argument('--factors', nargs='+', default=['VOL10', 'single_day_VPT_12'],
                        help='要检验的因子列表')
+    parser.add_argument('--factor-dir', type=str, default=None,
+                       help='因子文件目录，会自动查找包含指定因子的CSV文件')
     
     # Alphalens 参数
     parser.add_argument('--quantiles', type=int, default=10,
@@ -115,6 +122,8 @@ class CFG:
         self.ROLL_WIN = args.roll_win
         self.MONITOR_CSV = args.monitor_csv
         self.LAST_ONLY = args.last_only
+        # 因子文件目录（可选）
+        self.FACTOR_DIR = getattr(args, 'factor_dir', None)
         # 股票数量限制（用于测试，None表示使用全部股票）
         self.MAX_STOCKS = getattr(args, 'max_stocks', None)
         # 因子元数据（暂时保留默认值）
@@ -447,6 +456,38 @@ class FactorTester:
     # ---------- 取因子 ----------
     def get_factors(self):
         print('正在计算因子...')
+        
+        # 如果使用文件因子，检查并更新日期范围和股票列表
+        if self.custom_factors:
+            file_date_ranges = []
+            file_stocks_list = []
+            for calc in self.custom_factors.values():
+                if isinstance(calc, FileFactorCalculator):
+                    file_start, file_end = calc.get_file_date_range()
+                    if file_start and file_end:
+                        file_date_ranges.append((file_start, file_end))
+                    # 从文件因子中获取股票列表
+                    stocks = calc.get_file_stocks()
+                    if stocks:
+                        file_stocks_list.extend(stocks)
+            
+            # 更新日期范围
+            if file_date_ranges:
+                # 使用所有文件因子中最小的日期范围（取交集）
+                min_start = max(r[0] for r in file_date_ranges)
+                max_end = min(r[1] for r in file_date_ranges)
+                if min_start <= max_end:
+                    # 更新配置中的日期范围
+                    self.cfg.START = min_start.strftime('%Y-%m-%d')
+                    self.cfg.END = max_end.strftime('%Y-%m-%d')
+                    print(f'[文件因子] 使用因子文件日期范围: {self.cfg.START} 到 {self.cfg.END}')
+            
+            # 如果股票列表为空，从文件因子中获取股票列表
+            if not self.stocks and file_stocks_list:
+                # 去重并排序
+                self.stocks = sorted(list(set(file_stocks_list)))
+                print(f'[文件因子] 从因子文件中获取到 {len(self.stocks)} 只股票')
+        
         factors = {}
         for f in self.cfg.FACTORS:
             try:
@@ -454,6 +495,8 @@ class FactorTester:
                 if f in self.custom_factors:
                     factor_data = {}
                     calculator = self.custom_factors[f]
+                    
+                    # 使用配置中的日期范围（已在run方法中根据文件因子更新）
                     for stock in self._get_stocks_for_calculation():
                         try:
                             factor_series = calculator.calculate(stock, self.cfg.START, self.cfg.END)
@@ -596,7 +639,20 @@ class FactorTester:
         Returns:
             list: FactorTestResult 列表
         """
-        self.get_stocks()
+        # 如果使用文件因子，跳过get_stocks()，直接依赖get_factors()从文件因子中获取股票列表
+        # 否则，先获取股票列表
+        if not self.custom_factors:
+            # 没有文件因子，先获取股票列表
+            if not self.stocks:
+                self.get_stocks()
+                # 如果股票列表仍然为空，给出警告
+                if not self.stocks:
+                    print(f'⚠️  警告：股票列表为空，无法进行因子验证')
+                    print(f'   请检查：')
+                    print(f'   1. OSS连接是否正常（用于获取股票池）')
+                    print(f'   2. --stock-pool 参数是否正确')
+        
+        # 获取因子（get_factors 内部会处理文件因子的股票列表和日期范围）
         factors = self.get_factors()
         price = self.get_price()
         industry = self.get_industry_series()
@@ -790,7 +846,49 @@ class FactorTester:
         if not hasattr(self, '_stocks_loaded'):
             print(f'[步骤1] 加载股票池 - {time.strftime("%H:%M:%S")}')
             step_start = time.time()
-            self.get_stocks()
+            
+            # 如果使用文件因子，需要先调用get_factors()的逻辑来获取股票列表和日期范围
+            # 因为get_single_factor()不会调用get_factors()，所以需要手动处理
+            if self.custom_factors:
+                # 使用文件因子，从文件因子中获取股票列表和日期范围
+                file_date_ranges = []
+                file_stocks_list = []
+                for calc in self.custom_factors.values():
+                    if isinstance(calc, FileFactorCalculator):
+                        file_start, file_end = calc.get_file_date_range()
+                        if file_start and file_end:
+                            file_date_ranges.append((file_start, file_end))
+                        # 从文件因子中获取股票列表
+                        stocks = calc.get_file_stocks()
+                        if stocks:
+                            file_stocks_list.extend(stocks)
+                
+                # 更新日期范围
+                if file_date_ranges:
+                    min_start = max(r[0] for r in file_date_ranges)
+                    max_end = min(r[1] for r in file_date_ranges)
+                    if min_start <= max_end:
+                        self.cfg.START = min_start.strftime('%Y-%m-%d')
+                        self.cfg.END = max_end.strftime('%Y-%m-%d')
+                        print(f'[文件因子] 使用因子文件日期范围: {self.cfg.START} 到 {self.cfg.END}')
+                
+                # 获取股票列表
+                if file_stocks_list:
+                    self.stocks = sorted(list(set(file_stocks_list)))
+                    print(f'[文件因子] 从因子文件中获取到 {len(self.stocks)} 只股票')
+                elif not self.stocks:
+                    # 如果文件因子中没有股票列表，尝试从配置获取
+                    self.get_stocks()
+            else:
+                # 没有文件因子，先获取股票列表
+                if not self.stocks:
+                    self.get_stocks()
+            
+            # 如果股票列表仍然为空，给出警告并返回
+            if not self.stocks:
+                print(f'⚠️  警告：股票列表为空，无法进行因子验证')
+                return []
+            
             print(f'[步骤1完成] 股票池加载耗时: {time.time() - step_start:.2f}秒')
             
             print(f'[步骤2] 加载价格数据 - {time.strftime("%H:%M:%S")}')
@@ -950,6 +1048,8 @@ def main():
     print(f"回测区间: {cfg.START} ~ {cfg.END}")
     print(f"股票池: {cfg.STOCK_POOL}")
     print(f"因子列表: {cfg.FACTORS}")
+    if cfg.FACTOR_DIR:
+        print(f"因子文件目录: {cfg.FACTOR_DIR}")
     print(f"分位数: {cfg.QUANTILES}")
     print(f"调仓周期: {cfg.PERIODS}")
     print(f"滚动窗口: {cfg.ROLL_WIN} 天")
@@ -957,8 +1057,28 @@ def main():
     print("=" * 60)
     print()
     
+    # 如果提供了因子文件目录，创建因子计算器
+    custom_factors = None
+    if cfg.FACTOR_DIR:
+        print(f"[配置] 从因子文件目录加载因子: {cfg.FACTOR_DIR}")
+        custom_factors = {}
+        for factor_name in cfg.FACTORS:
+            try:
+                calc = create_factor_calculator(
+                    factor_name=factor_name,
+                    factor_dir=cfg.FACTOR_DIR
+                )
+                custom_factors[factor_name] = calc
+                print(f"  ✓ {factor_name}: 已创建因子计算器")
+            except Exception as e:
+                print(f"  ✗ {factor_name}: 创建失败 - {e}")
+        if not custom_factors:
+            print("⚠️  警告: 未成功创建任何因子计算器，将使用默认方法")
+            custom_factors = None
+        print()
+    
     # 运行因子检验
-    tester = FactorTester(cfg)
+    tester = FactorTester(cfg, custom_factors=custom_factors)
     tester.run()
 
 

@@ -8,13 +8,16 @@
 ```
 live_trading/
   live_config.py          # 配置数据类集合
-  prediction_loader.py    # 聚合多个预测CSV
+  prediction_loader.py    # 聚合多个预测CSV（支持多模型集成）
   portfolio_builder.py    # 组合构建 + 行业/权重约束
   risk_manager.py         # 回撤/波动/集中度 + 熔断判断
   execution_engine.py     # 订单生成 & 模拟成交（待接Broker）
   state_store.py          # 持仓、NAV、审计、漂移指标持久化
-  drift_detector.py       # 滚动IC & 漂移触发
-  run_live.py             # 主流程编排脚本
+  drift_detector.py       # 滚动IC & 漂移触发（支持每模型IC）
+  run_live.py             # 主流程编排脚本（原有）
+  run_premarket.py        # 盘前流程：集成多模型预测 → 生成订单
+  run_trade.py            # 盘中执行：读取 orders.csv → 下单
+  run_settle.py           # 收盘结算：更新NAV → 计算IC → 触发重训
   README_live_trading.md  # 文档
 ```
 
@@ -28,14 +31,82 @@ live_trading/
 
 ## 配置说明
 在 `live_config.py` 中：
-- `DataIngestionConfig`: 预测数据加载行为（文件模式、最近天数）。
+- `DataIngestionConfig`: 预测数据加载行为（文件模式、最近天数、**模型列表**）。
+  - `models`: 模型目录名列表（如 `['model_a', 'model_b']`）
 - `PortfolioConfig`: Top-N、单股/行业权重上限、最小权重阈值、再平衡节奏。
+  - `top_n`: 只做多前N只股票（默认50）
+  - `max_stock_weight`: 单票上限（默认0.10）
+  - `max_industry_weight`: 行业上限（默认0.35）
 - `RiskConfig`: 回撤、熔断、波动率目标、HHI 集中度限制、IC 漂移窗口阈值。
+  - `min_ic_threshold`: IC阈值（低于此值触发重训，默认0.02）
 - `ExecutionConfig`: 是否模拟、滑点BP上限、并发订单数量、价格源占位。
-- `PersistenceConfig`: 状态文件路径（持仓、NAV、审计、漂移结果）。
+- `PersistenceConfig`: 状态文件路径（持仓、NAV、审计、漂移结果、**目标权重、订单、每模型IC、重训标记**）。
 - `MonitoringConfig`: 指标与告警阈值（预留）。
 
-## 运行 (原型)
+## 天级多模型策略流程（MVP）
+
+### 数据格式
+每天 **07:00 前** 多个模型已落盘 `csv`：
+```
+data/
+  model_a/20250603.csv
+  model_b/20250603.csv
+```
+每个 CSV 仅两列：`code,score`（score 越高越看涨）。
+
+### 流程拆分（按时间段执行）
+
+#### 1. 盘前流程（07:00）- `run_premarket.py`
+- 加载多模型预测并集成（score → rank → 等权合并）
+- 应用风险检查（单票≤10%，行业≤30%）
+- 生成目标权重 `target_w.csv`
+- 生成订单清单 `orders.csv`（code,side,shares）
+
+```bash
+python -m live_trading.run_premarket 20250603
+```
+
+#### 2. 盘中执行（09:30）- `run_trade.py`
+- 读取 `orders.csv`
+- 执行订单（模拟或真实Broker）
+- 更新持仓 `positions.csv`
+
+```bash
+python -m live_trading.run_trade 20250603
+```
+
+#### 3. 收盘结算（15:15）- `run_settle.py`
+- 拉收盘价 → 计算 NAV → 追加 `nav.csv`
+- 计算各模型 IC → 写入 `model_ic.csv`
+- 若连续 5 天平均 IC < 0.02 → 生成 `retrain.flag`
+
+```bash
+python -m live_trading.run_settle 20250603
+```
+
+### 输出文件清单
+在 `live_state/` 目录生成：
+- `target_w.csv`：目标权重（code, weight）
+- `orders.csv`：订单清单（code, side, shares）
+- `positions.csv`：最新持仓（权重+模拟均价）
+- `nav.csv`：净值历史
+- `model_ic.csv`：每个模型的IC追踪（date, model, ic）
+- `retrain.flag`：重训信号标记文件
+- `audit.log`：关键事件记录
+
+### Cron 调度示例
+```bash
+# 盘前 07:00
+00 07 * * 1-5  cd /path/to/project && python -m live_trading.run_premarket $(date +\%Y\%m\%d)
+
+# 盘中 09:30
+30 09 * * 1-5  cd /path/to/project && python -m live_trading.run_trade $(date +\%Y\%m\%d)
+
+# 收盘 15:15
+15 15 * * 1-5  cd /path/to/project && python -m live_trading.run_settle $(date +\%Y\%m\%d)
+```
+
+## 运行 (原有单脚本模式)
 ```bash
 python -m live_trading.run_live
 ```
@@ -63,6 +134,20 @@ python -m live_trading.run_live
 - 回测阶段选出的策略/参数可直接映射到 `live_config.py` 的 `PortfolioConfig` 和 `RiskConfig`。  
 
 ## 数据要求
+
+### 多模型集成模式（MVP）
+预测CSV格式：`code,score`
+- 文件路径：`data/{model_name}/{YYYYMMDD}.csv`
+- `code`：六位股票代码（如 '000001'）
+- `score`：模型打分（越高越看涨）
+
+集成逻辑：
+1. 每个模型内：`score → rank(pct=True) - 0.5`（中性化）
+2. 模型间：等权平均
+3. Top-N 筛选（权重 ≥ 0）
+4. 归一化到权重和=1
+
+### 原有模式（兼容）
 预测CSV最少列：`date, code, weight`。若 `weight` 缺失且 `allow_missing_weight=True`，自动补 1.0。多模型重复同一 `code,date` 时取均值。日期需可被 `pd.to_datetime` 解析并标准化为日。股票代码需为六位数字串。
 
 ## 审计规范建议

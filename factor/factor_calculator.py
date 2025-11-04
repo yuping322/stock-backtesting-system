@@ -126,6 +126,24 @@ class FileFactorCalculator(FactorCalculator):
         self.file_path = file_path
         self.factor_name = factor_name
         self._cache = None
+        self._file_date_range = None  # 文件的实际日期范围
+        self._file_stocks = None  # 文件中的股票列表
+    
+    def get_file_date_range(self):
+        """获取因子文件的实际日期范围"""
+        if self._cache is None:
+            self._cache = self._load_file()
+        if self._file_date_range:
+            return self._file_date_range[0], self._file_date_range[1]
+        return None, None
+    
+    def get_file_stocks(self):
+        """获取因子文件中的股票列表"""
+        if self._cache is None:
+            self._cache = self._load_file()
+        if self._file_stocks is None and not self._cache.empty:
+            self._file_stocks = sorted(self._cache.index.get_level_values('code').unique().tolist())
+        return self._file_stocks if self._file_stocks else []
     
     def calculate(self, stock_code: str, start_date: str, end_date: str) -> pd.Series:
         """从文件加载因子值"""
@@ -136,22 +154,40 @@ class FileFactorCalculator(FactorCalculator):
         if self._cache.empty:
             return pd.Series(dtype=float)
         
+        # 使用因子文件中的实际日期范围（如果调用者传入的日期范围超出文件范围）
+        if self._file_date_range:
+            file_start, file_end = self._file_date_range
+            # 如果调用者传入的日期范围超出文件范围，使用文件的实际范围
+            actual_start = max(pd.Timestamp(start_date), file_start)
+            actual_end = min(pd.Timestamp(end_date), file_end)
+        else:
+            actual_start = pd.Timestamp(start_date)
+            actual_end = pd.Timestamp(end_date)
+        
         # 过滤股票代码和日期范围
         try:
             # 标准化股票代码
             code_normalized = self._normalize_code(stock_code)
             
-            # 创建日期范围
-            date_range = pd.date_range(start_date, end_date, freq='D')
+            # 标准化股票代码（补齐6位）
+            code_normalized = code_normalized.zfill(6)
             
-            # 筛选数据
+            # 筛选数据：使用日期比较而不是精确匹配，因为因子文件可能只包含交易日
+            # 使用文件的实际日期范围（可能比调用者传入的范围更小）
             filtered = self._cache.loc[
-                (self._cache.index.get_level_values('date').isin(date_range)) &
+                (self._cache.index.get_level_values('date') >= actual_start) &
+                (self._cache.index.get_level_values('date') <= actual_end) &
                 (self._cache.index.get_level_values('code') == code_normalized)
             ]
             
             if not filtered.empty:
-                return filtered[self.factor_name]
+                # 获取因子值的Series
+                factor_series = filtered[self.factor_name]
+                # 如果索引是MultiIndex，只保留日期部分作为索引
+                if isinstance(factor_series.index, pd.MultiIndex):
+                    # 重置索引，只保留日期
+                    factor_series = factor_series.reset_index(level='code', drop=True)
+                return factor_series
             else:
                 return pd.Series(dtype=float)
                 
@@ -162,8 +198,8 @@ class FileFactorCalculator(FactorCalculator):
     def _load_file(self) -> pd.DataFrame:
         """加载因子文件"""
         try:
-            # 读取CSV时指定代码列为字符串
-            df = pd.read_csv(self.file_path, dtype={'code': str})
+            # 读取CSV文件（不指定dtype，让pandas自动推断）
+            df = pd.read_csv(self.file_path)
             
             # 检查必要的列
             if 'date' not in df.columns or 'code' not in df.columns:
@@ -175,23 +211,34 @@ class FileFactorCalculator(FactorCalculator):
             # 日期列转换为 datetime
             df['date'] = pd.to_datetime(df['date'])
             
-            # 标准化代码列（去掉后缀并补齐6位）
-            df['code'] = df['code'].apply(self._normalize_code)
-            df['code'] = df['code'].str.zfill(6)  # 补齐6位
+            # 标准化代码列：先转换为字符串，去掉后缀，再补齐6位
+            # 处理数字代码（如1, 2, 63）和字符串代码（如'000001', '000001.XSHG'）
+            df['code'] = df['code'].astype(str).str.strip()  # 转为字符串并去除空格
+            df['code'] = df['code'].apply(self._normalize_code)  # 去掉.XSHG/.XSHE后缀
+            df['code'] = df['code'].str.zfill(6)  # 补齐6位（如 '1' -> '000001', '63' -> '000063'）
             
             # 设置 MultiIndex
             df = df.set_index(['date', 'code']).sort_index()
+            
+            # 记录文件的实际日期范围和股票列表
+            if not df.empty:
+                dates = df.index.get_level_values('date')
+                self._file_date_range = (dates.min(), dates.max())
+                self._file_stocks = sorted(df.index.get_level_values('code').unique().tolist())
             
             return df
             
         except Exception as e:
             print(f"加载因子文件失败 {self.file_path}: {e}")
+            import traceback
+            traceback.print_exc()
             return pd.DataFrame()
     
     def _normalize_code(self, code: str) -> str:
         """标准化股票代码"""
-        # 转换为字符串并去掉后缀
-        code = str(code).replace('.XSHG', '').replace('.XSHE', '')
+        # 转换为字符串，去掉后缀，去除空格
+        code = str(code).strip().replace('.XSHG', '').replace('.XSHE', '')
+        # 如果代码是纯数字，直接返回（后面会zfill补齐）
         return code
 
 
@@ -306,37 +353,92 @@ def _calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
+def _find_factor_file_in_dir(factor_dir: str, factor_name: str) -> Optional[str]:
+    """
+    在目录中查找包含指定因子的CSV文件
+    
+    Args:
+        factor_dir: 因子文件目录
+        factor_name: 因子名称
+        
+    Returns:
+        找到的文件路径，如果未找到返回None
+    """
+    from pathlib import Path
+    
+    factor_dir = Path(factor_dir)
+    if not factor_dir.exists():
+        return None
+    
+    # 查找所有CSV文件
+    csv_files = list(factor_dir.glob('*.csv'))
+    
+    # 按修改时间排序（最新的优先）
+    csv_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    
+    # 检查每个文件是否包含该因子
+    for csv_file in csv_files:
+        try:
+            # 只读取列名，不读取全部数据
+            df_columns = pd.read_csv(csv_file, nrows=0).columns.tolist()
+            if 'date' in df_columns and 'code' in df_columns and factor_name in df_columns:
+                return str(csv_file)
+        except Exception:
+            continue
+    
+    return None
+
+
 # 辅助函数：创建因子计算器
 def create_factor_calculator(
     factor_name: Optional[str] = None,
     factor_func: Optional[Callable] = None,
     data_loader=None,
-    file_path: Optional[str] = None
+    file_path: Optional[str] = None,
+    factor_dir: Optional[str] = None
 ) -> FactorCalculator:
     """
     创建因子计算器
     
     Args:
-        factor_name: 内置因子名称或文件中的因子列名
+        factor_name: 内置因子名称、文件中的因子列名或qlib因子名（如ROC5, MA10等）
         factor_func: 自定义因子计算函数
         data_loader: 数据加载器
         file_path: 因子文件路径（优先使用）
+        factor_dir: 因子文件目录，会自动查找包含指定因子的CSV文件
         
     Returns:
         FactorCalculator: 因子计算器实例
+        
+    Examples:
+        # 从目录自动查找因子文件
+        calc = create_factor_calculator(factor_name='ROC5', factor_dir='./factors')
+        
+        # 直接指定文件路径
+        calc = create_factor_calculator(factor_name='ROC5', file_path='./factors/Alpha158_20240101_20241231.csv')
+        
+        # 使用内置因子
+        calc = create_factor_calculator(factor_name='VOL10')
     """
-    # 优先从文件加载
+    # 优先级1: 直接指定文件路径
     if file_path:
         if not factor_name:
             raise ValueError("使用 file_path 时必须提供 factor_name（因子列名）")
         return FileFactorCalculator(file_path, factor_name)
     
-    # 使用内置因子
+    # 优先级2: 从目录查找因子文件
+    if factor_dir and factor_name:
+        found_file = _find_factor_file_in_dir(factor_dir, factor_name)
+        if found_file:
+            return FileFactorCalculator(found_file, factor_name)
+        # 如果目录中没找到，继续尝试其他方式
+    
+    # 优先级3: 使用内置因子
     if factor_name and factor_name in BuiltinFactorCalculator.BUILTIN_FACTORS:
         return BuiltinFactorCalculator(factor_name, data_loader)
     
-    # 使用自定义函数
-    elif factor_func:
+    # 优先级4: 使用自定义函数
+    if factor_func:
         if isinstance(factor_func, Callable):
             # 检查函数签名
             import inspect
@@ -351,8 +453,12 @@ def create_factor_calculator(
                 raise ValueError("因子函数必须接受 1 个参数 (DataFrame) 或 3 个参数 (code, start, end)")
         else:
             raise ValueError("factor_func 必须是可调用对象")
-    else:
-        raise ValueError("必须提供 factor_name 或 factor_func")
+    
+    # 如果指定了factor_dir但没找到文件，报错
+    if factor_dir and factor_name:
+        raise ValueError(f"在目录 {factor_dir} 中未找到包含因子 '{factor_name}' 的文件")
+    
+    raise ValueError("必须提供 factor_name（配合factor_dir或file_path）或 factor_func")
 
 
 # 示例用法

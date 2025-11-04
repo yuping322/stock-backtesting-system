@@ -22,6 +22,15 @@ from alphalens.performance import (
 from alphalens.utils import get_clean_factor_and_forward_returns
 import oss2
 from types import SimpleNamespace
+from pathlib import Path
+
+# 尝试导入 dotenv
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+    load_dotenv = None
 
 calendar = None
 try:
@@ -230,19 +239,66 @@ NO_SUCH_KEY_ERROR = getattr(OSS_EXCEPTIONS, "NoSuchKey", FileNotFoundError)
 OSS_GENERIC_ERROR = getattr(OSS_EXCEPTIONS, "OssError", Exception)
 
 
+# ========== OSS 凭证加载（从 .env 文件读取，只读取一次并缓存） ==========
 
-_OSS_ACCESS_KEY_ID = os.getenv("OSS_ACCESS_KEY_ID")
-_OSS_ACCESS_KEY_SECRET =  os.getenv("OSS_ACCESS_KEY_SECRET")
-_OSS_ENDPOINT = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
-_OSS_BUCKET_NAME = os.getenv("OSS_BUCKET_NAME", "test123432")
+def _load_oss_credentials():
+    """
+    从 .env 文件加载 OSS 凭证，只读取一次并缓存
+    
+    Returns:
+        tuple: (access_key_id, access_key_secret, endpoint, bucket_name)
+    """
+    # 查找 .env 文件（从当前文件所在目录向上查找，直到项目根目录）
+    current_file = Path(__file__).resolve()
+    current_dir = current_file.parent
+    
+    # 优先查找当前目录的 .env 文件
+    env_file = current_dir / ".env"
+    
+    # 如果当前目录没有，向上查找项目根目录（查找包含 .git 或 README.md 的目录）
+    if not env_file.exists():
+        # 从当前目录向上查找，直到找到包含 .git 或 README.md 的目录
+        search_dir = current_dir
+        while search_dir.parent != search_dir:  # 直到根目录
+            if (search_dir / ".git").exists() or (search_dir / "README.md").exists():
+                env_file = search_dir / ".env"
+                break
+            search_dir = search_dir.parent
+        else:
+            # 如果没找到项目根目录，使用当前目录
+            env_file = current_dir / ".env"
+    
+    # 优先从 .env 文件加载（强制从 .env 读取）
+    if DOTENV_AVAILABLE and env_file.exists():
+        # override=True 表示 .env 文件的值优先于环境变量
+        load_dotenv(env_file, override=True)
+        LOGGER.info(f"已从 .env 文件加载配置: {env_file}")
+    elif env_file.exists():
+        LOGGER.warning("未安装 python-dotenv，无法从 .env 文件读取配置，将使用环境变量")
+    else:
+        LOGGER.warning(f"未找到 .env 文件: {env_file}，将使用环境变量")
+    
+    # 从环境变量读取（.env 文件的值已通过 load_dotenv 加载到环境变量中）
+    access_key_id = os.getenv("OSS_ACCESS_KEY_ID")
+    access_key_secret = os.getenv("OSS_ACCESS_KEY_SECRET")
+    endpoint = os.getenv("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
+    bucket_name = os.getenv("OSS_BUCKET_NAME", "test123432")
+    
+    return access_key_id, access_key_secret, endpoint, bucket_name
 
+# 在模块加载时读取一次并缓存
+_OSS_ACCESS_KEY_ID, _OSS_ACCESS_KEY_SECRET, _OSS_ENDPOINT, _OSS_BUCKET_NAME = _load_oss_credentials()
+
+# 初始化 OSS 认证和 Bucket（使用缓存的凭证）
 if not _OSS_ACCESS_KEY_ID or not _OSS_ACCESS_KEY_SECRET:
     LOGGER.warning("OSS 访问凭证未配置，相关函数将无法访问 OSS 资源")
+    LOGGER.warning("请检查 .env 文件或环境变量中的 OSS_ACCESS_KEY_ID 和 OSS_ACCESS_KEY_SECRET")
     auth = None
     bucket = None
 else:
     auth = oss2.Auth(_OSS_ACCESS_KEY_ID, _OSS_ACCESS_KEY_SECRET)
     bucket = oss2.Bucket(auth, _OSS_ENDPOINT, _OSS_BUCKET_NAME)
+    LOGGER.info(f"OSS 已初始化: endpoint={_OSS_ENDPOINT}, bucket={_OSS_BUCKET_NAME}")
 
 
 
@@ -1166,29 +1222,86 @@ def _load_index_df(index_symbol: str) -> pd.DataFrame:
     """
     # 查找带中文名称的文件
     prefix = f"index/{index_symbol}_"
-    for obj in oss2.ObjectIterator(bucket, prefix=prefix):
-        if obj.key.endswith(".csv"):
-            content = bucket.get_object(obj.key).read()
-            df = pd.read_csv(io.BytesIO(content), dtype=str)
-            
-            # 重命名列
-            rename = {"品种代码": "code", "纳入日期": "in_date", "指数纳入日期": "in_date"}
-            df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-            
-            # 手动转换日期，避免pandas的重复键问题
-            if "in_date" not in df.columns:
-                raise KeyError("缺少 in_date 列，请检查指数文件表头")
-            date_col = df["in_date"].copy()
-            df["in_date"] = pd.Series([pd.to_datetime(d, errors="coerce") for d in date_col])
-            
-            # 检查是否有无效日期
-            na_count = df["in_date"].isna().sum()
-            if na_count > 0:
-                LOGGER.warning(f"有 {na_count} 个无效日期，已过滤")
-                df = df.dropna(subset=["in_date"])
-            return df
     
-    raise FileNotFoundError(f"OSS 上找不到 {index_symbol} 相关的指数文件")
+    # 添加重试机制
+    max_retries = 3
+    for retry in range(max_retries):
+        try:
+            file_found = False
+            for obj in oss2.ObjectIterator(bucket, prefix=prefix):
+                if obj.key.endswith(".csv"):
+                    content = bucket.get_object(obj.key).read()
+                    df = pd.read_csv(io.BytesIO(content), dtype=str)
+                    file_found = True
+                    break
+            
+            if not file_found:
+                # 如果没找到文件，继续下一次尝试
+                if retry < max_retries - 1:
+                    LOGGER.warning(f"未找到文件，重试 {retry + 1}/{max_retries}...")
+                    import time
+                    time.sleep(1)
+                    continue
+                raise FileNotFoundError(f"OSS 上找不到 {index_symbol} 相关的指数文件")
+            
+            # 如果成功找到并读取文件，跳出重试循环
+            break
+        except (oss2.exceptions.RequestError, requests.exceptions.SSLError, Exception) as e:
+            if retry < max_retries - 1:
+                LOGGER.warning(f"OSS连接失败，重试 {retry + 1}/{max_retries}... 错误: {e}")
+                import time
+                time.sleep(1)  # 等待1秒后重试
+                continue
+            else:
+                # 最后一次重试失败，抛出异常
+                raise
+    
+    # 重命名列
+    rename = {"品种代码": "code", "纳入日期": "in_date", "指数纳入日期": "in_date"}
+    # 只重命名存在的列，避免重复列名
+    for old_name, new_name in rename.items():
+        if old_name in df.columns and new_name not in df.columns:
+            df = df.rename(columns={old_name: new_name})
+    
+    # 如果有多个in_date列，只保留第一个（通过drop_duplicates处理列）
+    if df.columns.tolist().count("in_date") > 1:
+        # 删除重复的列名，保留第一个
+        cols = df.columns.tolist()
+        seen = set()
+        new_cols = []
+        for col in cols:
+            if col == "in_date":
+                if "in_date" not in seen:
+                    new_cols.append("in_date")
+                    seen.add("in_date")
+            else:
+                new_cols.append(col)
+        df = df.iloc[:, [cols.index(c) for c in new_cols]]
+        df.columns = new_cols
+    
+    # 手动转换日期，避免pandas的重复键问题
+    if "in_date" not in df.columns:
+        raise KeyError("缺少 in_date 列，请检查指数文件表头")
+    # 确保in_date是单列Series
+    if isinstance(df["in_date"], pd.DataFrame):
+        # 如果返回DataFrame，取第一列
+        date_col = df["in_date"].iloc[:, 0]
+    else:
+        date_col = df["in_date"].copy()
+    df["in_date"] = pd.Series([pd.to_datetime(d, errors="coerce") for d in date_col], index=df.index)
+    
+    # 检查是否有无效日期
+    na_mask = df["in_date"].isna()
+    # .sum() 应该返回标量，但为了兼容性，确保是标量整数
+    try:
+        na_count = int(na_mask.sum())
+    except (ValueError, TypeError):
+        # 如果.sum()返回非标量，使用dropna并记录警告
+        na_count = len(df) - len(df.dropna(subset=["in_date"]))
+    if na_count > 0:
+        LOGGER.warning(f"有 {na_count} 个无效日期，已过滤")
+        df = df.dropna(subset=["in_date"])
+    return df
 
 # ---------- 主 API ----------
 def get_index_stocks(

@@ -90,6 +90,8 @@ def parse_main_args():
                        help='自定义因子文件路径')
     parser.add_argument('--custom-factor-name', type=str, default=None,
                        help='自定义因子列名（需要与 --custom-factor-file 一起使用）')
+    parser.add_argument('--factor-dir', type=str, default=None,
+                       help='因子文件目录，会自动查找包含指定因子的CSV文件')
     
     return parser.parse_args()
 
@@ -399,7 +401,22 @@ def main():
     
     # 创建自定义因子计算器（如果有）
     custom_factors = {}
-    if args.custom_factor_file and args.custom_factor_name:
+    
+    # 优先使用因子文件目录
+    if args.factor_dir:
+        print(f"[配置] 从因子文件目录加载因子: {args.factor_dir}")
+        for factor_name in cfg.FACTORS:
+            try:
+                calc = create_factor_calculator(
+                    factor_name=factor_name,
+                    factor_dir=args.factor_dir
+                )
+                custom_factors[factor_name] = calc
+                print(f"  ✓ {factor_name}: 已创建因子计算器")
+            except Exception as e:
+                print(f"  ✗ {factor_name}: 创建失败 - {e}")
+        print()
+    elif args.custom_factor_file and args.custom_factor_name:
         print(f"加载自定义因子: {args.custom_factor_name} from {args.custom_factor_file}")
         custom_factors[args.custom_factor_name] = create_factor_calculator(
             file_path=args.custom_factor_file,
@@ -407,7 +424,7 @@ def main():
         )
     
     # 创建因子测试器
-    tester = FactorTester(cfg, custom_factors=custom_factors)
+    tester = FactorTester(cfg, custom_factors=custom_factors if custom_factors else None)
     
     # 决定是否画图
     should_plot = args.plot == 'true'

@@ -21,6 +21,7 @@ class DataIngestionConfig:
     required_columns: List[str] = field(default_factory=lambda: ["date", "code", "weight"])  # base schema
     allow_missing_weight: bool = True  # if True, default weight=1.0 when absent
     normalize_codes: bool = True
+    models: List[str] = field(default_factory=lambda: ["model_a", "model_b"])  # model directory names for ensemble
 
 
 @dataclass
@@ -61,6 +62,10 @@ class PersistenceConfig:
     position_file: str = "positions.csv"
     audit_file: str = "audit.log"
     drift_file: str = "drift_metrics.csv"
+    target_weights_file: str = "target_w.csv"  # target weights from premarket
+    orders_file: str = "orders.csv"  # orders to execute (code,side,shares)
+    model_ic_file: str = "model_ic.csv"  # per-model IC tracking
+    retrain_flag_file: str = "retrain.flag"  # flag file to trigger retraining
 
 
 @dataclass

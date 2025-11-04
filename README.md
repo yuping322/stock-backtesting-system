@@ -199,6 +199,48 @@ python factor/factor.py --help
 - **Backtrader**: 回测引擎
 - **Streamlit**: Web界面
 - **Pandas/NumPy**: 数据处理
+
+## 机器学习因子建模管线（ML Pipeline）
+
+新增支持特征预处理与分组子模型融合，命令行入口 `python -m ml.ml_pipeline`，核心步骤包括：
+
+1. Baseline 建模：对全部因子训练单一模型并输出 SHAP 重要性。
+2. Groups 分组：使用 Spearman 相关 + 层次聚类对高重要性因子进行分组，限制最大组数。
+3. Submodels 分组子模型：针对每个因子组训练独立模型，按近期 IC (信息系数) 加权融合。
+4. All：一次性执行上述全流程。
+
+### 预处理功能
+通过 `FeaturePreprocessor` 实现以下步骤（仅基于训练窗口统计，避免数据泄漏）：
+- 缺失值填充：均值或中位数 (`--impute-method mean|median`)，使用 `--no-impute` 可禁用。
+- 标准化：Z-score (`--no-standardize` 禁用)。
+- 行业中性化：按行业去均值 (`--neutralize-industry`)，默认行业列名 `industry` 可用 `--industry-col` 修改。
+
+### 新增命令行参数
+```
+--no-impute                禁用缺失值填充（默认启用 mean 填充）
+--impute-method {mean,median}  选择填充方法（默认 mean）
+--no-standardize           禁用标准化（默认启用）
+--neutralize-industry      行业中性化（按行业去均值）
+--industry-col INDUSTRY    指定行业列名（默认 industry）
+```
+
+### IC 计算修复
+已修复子模型融合阶段 IC 误用训练集标签的问题，现使用测试窗口真实标签计算 Spearman IC，避免信息泄漏。
+
+### 输出文件示例
+- `baseline_predictions.csv` / `baseline_full_scores.csv`
+- `shap_importance.csv`
+- `factor_groups.json`
+- `group_model_predictions.csv` / `group_model_full_scores.csv` / `group_component_scores.csv`
+
+### 快速示例
+```
+python -m ml.ml_pipeline --factor-file data/factor_values_sample.csv --mode all --top-n 20 \
+	--neutralize-industry --impute-method median
+```
+
+若缺少标签列可使用 `--synthetic-label` 生成合成标签用于流程验证。若未安装 xgboost，管线会回退到线性回归用于测试环境运行。
+
 - **Matplotlib/Seaborn**: 数据可视化
 - **AKShare**: 金融数据获取
 - **Alphalens**: 因子分析
