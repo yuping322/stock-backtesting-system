@@ -49,3 +49,29 @@ Thumbs.db
 test_stock_pools.py
 test_stock_pools_mock.py
 check_oss_files.py
+
+# MLflow运行结果
+mlruns/
+alpha_test/mlruns/
+
+# 生成的因子文件和数据
+factors/
+factors_test/
+exported_data_all/
+
+# Qlib测试数据
+alpha_test/mini_data/
+alpha_test/mini_data_real/
+alpha_test/mini_qlib_data/
+alpha_test/mini_qlib_data_real/
+
+# 用户特定目录
+Users/
+alpha_test/Users/
+
+# 生成的数据文件（二进制格式）
+*.bin
+
+# 因子列表文件（如果是从生成的文件自动生成的，可以忽略）
+# alpha158_factors.txt
+# alpha360_factors.txt
