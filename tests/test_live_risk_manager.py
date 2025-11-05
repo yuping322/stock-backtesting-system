@@ -1,27 +1,63 @@
 import pandas as pd
-from live_trading.risk_manager import RiskManager
-from live_trading.live_config import RiskConfig
+from live_trading.risk_manager import CompositeRiskEngine, BlacklistRule, MarketCapRule
 
 
-def test_risk_manager_evaluate_drawdown_and_flags():
-    cfg = RiskConfig(max_drawdown_limit=0.05, circuit_break_drawdown=0.10, concentration_hhi_limit=0.30)
-    rm = RiskManager(cfg)
-    # simulate nav path with drawdown > limit but < circuit breaker
-    navs = [100, 102, 101, 99, 95]  # peak 102 -> dd at 95 is (95-102)/102 ≈ -0.0686
-    for n in navs:
-        rm.update_nav(n)
-    weights = pd.DataFrame({'code': ['000001', '000002'], 'weight': [0.6, 0.4]})
-    status = rm.evaluate(weights)
-    assert status.de_risk is True  # drawdown beyond limit
-    assert status.circuit_break is False  # not beyond circuit break threshold
+def test_risk_manager_blacklist_rule():
+    """Test that blacklist rule filters out blacklisted stocks"""
+    rules = [BlacklistRule()]
+    risk_engine = CompositeRiskEngine(rules)
+    
+    weights = pd.DataFrame({
+        'code': ['000001', '000002', '000003'],
+        'target_weight': [0.4, 0.3, 0.3]
+    })
+    
+    blacklist = pd.DataFrame({
+        'code': ['000002'],
+        'reason': ['suspended']
+    })
+    
+    ctx = {
+        'weights': weights,
+        'blacklist': blacklist,
+        'panel': pd.DataFrame(),
+        'industry': pd.DataFrame()
+    }
+    
+    result = risk_engine.run(ctx)
+    
+    # Should remove blacklisted stock
+    assert len(result['weights']) == 2
+    assert '000002' not in result['weights']['code'].values
+    assert '000001' in result['weights']['code'].values
+    assert '000003' in result['weights']['code'].values
 
 
-def test_risk_manager_circuit_break():
-    cfg = RiskConfig(max_drawdown_limit=0.05, circuit_break_drawdown=0.10)
-    rm = RiskManager(cfg)
-    # larger drawdown
-    navs = [100, 110, 105, 90]  # peak 110 -> dd at 90 is (90-110)/110 = -0.1818
-    for n in navs:
-        rm.update_nav(n)
-    status = rm.evaluate(pd.DataFrame({'code': ['000001'], 'weight': [1.0]}))
-    assert status.circuit_break is True
+def test_risk_manager_market_cap_rule():
+    """Test that market cap rule filters out low market cap stocks"""
+    rules = [MarketCapRule(min_market_cap=1e9)]  # 1 billion
+    risk_engine = CompositeRiskEngine(rules)
+    
+    weights = pd.DataFrame({
+        'code': ['000001', '000002'],
+        'target_weight': [0.5, 0.5]
+    })
+    
+    panel = pd.DataFrame({
+        'code': ['000001', '000002'],
+        'market_cap': [2e9, 5e8]  # 000002 below threshold
+    })
+    
+    ctx = {
+        'weights': weights,
+        'blacklist': pd.DataFrame(),
+        'panel': panel,
+        'industry': pd.DataFrame()
+    }
+    
+    result = risk_engine.run(ctx)
+    
+    # Should remove low market cap stock
+    assert len(result['weights']) == 1
+    assert '000001' in result['weights']['code'].values
+    assert '000002' not in result['weights']['code'].values

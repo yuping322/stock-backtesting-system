@@ -15,7 +15,85 @@ import pandas as pd
 import numpy as np
 
 # 添加项目根目录到路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+
+# 预导入模块以确保兼容性（解决批量运行时的导入问题）
+def _import_factor_modules():
+    """预导入factor模块，确保批量运行时也能正常工作"""
+    try:
+        import factor
+        import factor.factor_calculator
+        import factor.factor as factor_module
+    except ImportError:
+        pass
+
+_import_factor_modules()
+
+# 统一导入factor模块（兼容批量运行时的导入问题）
+def _safe_import_factor_calculator():
+    """安全导入factor_calculator模块"""
+    try:
+        from factor.factor_calculator import (
+            BuiltinFactorCalculator, OHLCVFactorCalculator, FileFactorCalculator,
+            CustomFactorCalculator, create_factor_calculator
+        )
+        return {
+            'BuiltinFactorCalculator': BuiltinFactorCalculator,
+            'OHLCVFactorCalculator': OHLCVFactorCalculator,
+            'FileFactorCalculator': FileFactorCalculator,
+            'CustomFactorCalculator': CustomFactorCalculator,
+            'create_factor_calculator': create_factor_calculator
+        }
+    except ImportError:
+        import factor.factor_calculator as fc
+        return {
+            'BuiltinFactorCalculator': fc.BuiltinFactorCalculator,
+            'OHLCVFactorCalculator': fc.OHLCVFactorCalculator,
+            'FileFactorCalculator': fc.FileFactorCalculator,
+            'CustomFactorCalculator': fc.CustomFactorCalculator,
+            'create_factor_calculator': fc.create_factor_calculator
+        }
+
+def _safe_import_factor():
+    """安全导入factor模块"""
+    try:
+        from factor.factor import (
+            parse_args, CFG, FactorTester, rolling_monitor, FactorTestResult
+        )
+        return {
+            'parse_args': parse_args,
+            'CFG': CFG,
+            'FactorTester': FactorTester,
+            'rolling_monitor': rolling_monitor,
+            'FactorTestResult': FactorTestResult
+        }
+    except ImportError:
+        import factor.factor as ff
+        return {
+            'parse_args': ff.parse_args,
+            'CFG': ff.CFG,
+            'FactorTester': ff.FactorTester,
+            'rolling_monitor': ff.rolling_monitor,
+            'FactorTestResult': ff.FactorTestResult
+        }
+
+# 全局导入（在文件级别统一导入）
+_factor_calc = _safe_import_factor_calculator()
+_factor_mod = _safe_import_factor()
+
+# 导出到全局命名空间，方便测试使用
+BuiltinFactorCalculator = _factor_calc['BuiltinFactorCalculator']
+OHLCVFactorCalculator = _factor_calc['OHLCVFactorCalculator']
+FileFactorCalculator = _factor_calc['FileFactorCalculator']
+CustomFactorCalculator = _factor_calc['CustomFactorCalculator']
+create_factor_calculator = _factor_calc['create_factor_calculator']
+parse_args = _factor_mod['parse_args']
+CFG = _factor_mod['CFG']
+FactorTester = _factor_mod['FactorTester']
+rolling_monitor = _factor_mod['rolling_monitor']
+FactorTestResult = _factor_mod['FactorTestResult']
 
 
 class TestFactorCalculator(unittest.TestCase):
@@ -35,8 +113,6 @@ class TestFactorCalculator(unittest.TestCase):
 
     def test_builtin_factor_calculator(self):
         """测试内置因子计算器"""
-        from factor.factor_calculator import BuiltinFactorCalculator
-
         # 测试 VOL10 因子
         calc = BuiltinFactorCalculator('VOL10')
         self.assertEqual(calc.factor_name, 'VOL10')
@@ -48,8 +124,6 @@ class TestFactorCalculator(unittest.TestCase):
 
     def test_ohlcv_factor_calculator(self):
         """测试 OHLCV 因子计算器"""
-        from factor.factor_calculator import OHLCVFactorCalculator
-
         def my_factor(ohlcv):
             return ohlcv['close'] / ohlcv['close'].rolling(5).mean()
 
@@ -61,8 +135,6 @@ class TestFactorCalculator(unittest.TestCase):
 
     def test_file_factor_calculator(self):
         """测试文件因子计算器"""
-        from factor.factor_calculator import FileFactorCalculator
-
         # 创建临时因子文件
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
             f.write('date,code,MY_FACTOR\n')
@@ -89,8 +161,6 @@ class TestFactorCalculator(unittest.TestCase):
 
     def test_custom_factor_calculator(self):
         """测试自定义因子计算器"""
-        from factor.factor_calculator import CustomFactorCalculator
-
         def custom_calc(code, start, end):
             dates = pd.date_range(start, end, freq='D')
             return pd.Series([1.0] * len(dates), index=dates)
@@ -103,8 +173,6 @@ class TestFactorCalculator(unittest.TestCase):
 
     def test_create_factor_calculator(self):
         """测试工厂函数"""
-        from factor.factor_calculator import create_factor_calculator
-
         # 测试内置因子
         calc1 = create_factor_calculator(factor_name='VOL10')
         self.assertIsNotNone(calc1)
@@ -205,7 +273,6 @@ class TestFactorParser(unittest.TestCase):
 
     def test_parse_args_default(self):
         """测试默认参数解析"""
-        from factor.factor import parse_args
         import sys
 
         # 保存原始 sys.argv
@@ -225,7 +292,6 @@ class TestFactorParser(unittest.TestCase):
 
     def test_parse_args_custom(self):
         """测试自定义参数解析"""
-        from factor.factor import parse_args
         import sys
 
         original_argv = sys.argv
@@ -259,7 +325,6 @@ class TestCFG(unittest.TestCase):
 
     def test_cfg_initialization(self):
         """测试配置初始化"""
-        from factor.factor import CFG, parse_args
         import sys
 
         original_argv = sys.argv
@@ -291,7 +356,6 @@ class TestFactorHelperFunctions(unittest.TestCase):
 
     def test_rolling_monitor(self):
         """测试滚动监控函数"""
-        from factor.factor import rolling_monitor, CFG, parse_args
         import sys
 
         original_argv = sys.argv
@@ -319,7 +383,6 @@ class TestFactorTester(unittest.TestCase):
 
     def test_factor_tester_initialization(self):
         """测试 FactorTester 初始化"""
-        from factor.factor import FactorTester, CFG, parse_args
         import sys
 
         original_argv = sys.argv
@@ -338,8 +401,6 @@ class TestFactorTester(unittest.TestCase):
 
     def test_factor_tester_with_custom_factors(self):
         """测试带自定义因子的 FactorTester"""
-        from factor.factor import FactorTester, CFG, parse_args
-        from factor.factor_calculator import create_factor_calculator
         import sys
 
         original_argv = sys.argv
@@ -365,8 +426,6 @@ class TestBuiltinFactors(unittest.TestCase):
 
     def test_builtin_factors_list(self):
         """测试内置因子列表"""
-        from factor.factor_calculator import BuiltinFactorCalculator
-
         # 检查内置因子列表
         builtin_factors = BuiltinFactorCalculator.BUILTIN_FACTORS
         
@@ -383,8 +442,6 @@ class TestBuiltinFactors(unittest.TestCase):
 
     def test_builtin_factor_functions(self):
         """测试内置因子函数"""
-        from factor.factor_calculator import BuiltinFactorCalculator
-
         # 创建测试数据
         dates = pd.date_range('2024-01-01', periods=30, freq='D')
         ohlcv = pd.DataFrame({

@@ -11,7 +11,22 @@ from pathlib import Path
 import pandas as pd
 
 # 添加项目路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _root_dir not in sys.path:
+    sys.path.insert(0, _root_dir)
+
+# 统一导入factor模块（兼容批量运行时的导入问题）
+def _safe_import_factor():
+    """安全导入factor模块"""
+    try:
+        from factor.factor import FactorTestResult
+        return {'FactorTestResult': FactorTestResult}
+    except ImportError:
+        import factor.factor as ff
+        return {'FactorTestResult': ff.FactorTestResult}
+
+_factor_mod = _safe_import_factor()
+FactorTestResult = _factor_mod['FactorTestResult']
 
 
 class TestMainFactor(unittest.TestCase):
@@ -19,8 +34,6 @@ class TestMainFactor(unittest.TestCase):
     
     def test_factor_test_result(self):
         """测试 FactorTestResult 类"""
-        from factor.factor import FactorTestResult
-        
         result = FactorTestResult()
         result.factor_name = 'TEST_FACTOR'
         result.period = 5
@@ -37,7 +50,6 @@ class TestMainFactor(unittest.TestCase):
     def test_save_results(self):
         """测试结果保存功能（使用 generate_summary_report 替代）"""
         from main_factor import generate_summary_report
-        from factor.factor import FactorTestResult
         
         # 创建测试结果
         result1 = FactorTestResult()
