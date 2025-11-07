@@ -1,123 +1,141 @@
-"""State persistence for live trading.
-
-Stores positions, NAV history, audit events, and drift metrics using simple CSV / log files.
+"""state_store: in-memory minimal state for positions, nav, orders and simple persistence hooks
 """
 from __future__ import annotations
-
-import os
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Any, List
 import pandas as pd
+import json
+import os
+import threading
+import hashlib
 from datetime import datetime
-
-from .live_config import PersistenceConfig
+import tempfile
+import shutil
 
 
 @dataclass
-class LiveState:
-    positions: pd.DataFrame  # columns: code, weight, avg_price
-    nav_history: pd.DataFrame  # columns: date, nav
-
-
 class StateStore:
-    def __init__(self, config: PersistenceConfig):
-        self.config = config
-        os.makedirs(self.config.state_dir, exist_ok=True)
+    positions: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["code","shares","avg_price","weight"]))
+    orders: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["order_id","code","side","shares","status"]))
+    nav: List[Dict[str, Any]] = field(default_factory=list)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
 
-    def _path(self, name: str) -> str:
-        return os.path.join(self.config.state_dir, name)
+    def snapshot_positions(self) -> pd.DataFrame:
+        return self.positions.copy()
 
-    def load_state(self) -> LiveState:
-        pos_path = self._path(self.config.position_file)
-        nav_path = self._path(self.config.nav_file)
-        if os.path.exists(pos_path):
-            positions = pd.read_csv(pos_path)
-        else:
-            positions = pd.DataFrame(columns=['code', 'weight', 'avg_price'])
-        if os.path.exists(nav_path):
-            nav_history = pd.read_csv(nav_path, parse_dates=['date'])
-        else:
-            nav_history = pd.DataFrame(columns=['date', 'nav'])
-        return LiveState(positions=positions, nav_history=nav_history)
+    def append_fill(self, fill: Dict[str, Any]):
+        # simple append logic
+        with self._lock:
+            self.nav.append({"ts": fill.get("ts"), "fill": fill})
 
-    def save_positions(self, df: pd.DataFrame):
-        df.to_csv(self._path(self.config.position_file), index=False)
+    def save(self, path: str):
+        """Save state to file with atomic write and backup"""
+        with self._lock:
+            state_data = {
+                'positions': self.positions.to_dict('records'),
+                'orders': self.orders.to_dict('records'),
+                'nav': self.nav,
+                'timestamp': datetime.now().isoformat(),
+                'version': '1.0'
+            }
 
-    def append_nav(self, date: datetime, nav: float):
-        nav_path = self._path(self.config.nav_file)
-        row = pd.DataFrame([[date, nav]], columns=['date', 'nav'])
-        if os.path.exists(nav_path):
-            row.to_csv(nav_path, mode='a', header=False, index=False)
-        else:
-            row.to_csv(nav_path, index=False)
+            # Calculate checksum for data integrity
+            data_str = json.dumps(state_data, sort_keys=True, default=str)
+            checksum = hashlib.sha256(data_str.encode()).hexdigest()
+            state_data['checksum'] = checksum
 
-    def audit(self, message: str, **kwargs: Any):
-        audit_path = self._path(self.config.audit_file)
-        ts = datetime.now().isoformat()
-        kv = " ".join([f"{k}={v}" for k, v in kwargs.items()])
-        line = f"{ts} | {message} {kv}\n"
-        with open(audit_path, 'a', encoding='utf-8') as f:
-            f.write(line)
+            # Atomic write using temporary file
+            temp_path = path + '.tmp'
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(state_data, f, indent=2, default=str)
 
-    def save_drift_metrics(self, df: pd.DataFrame):
-        df.to_csv(self._path(self.config.drift_file), index=False)
+                # Create backup if file exists
+                if os.path.exists(path):
+                    backup_path = path + '.backup'
+                    shutil.copy2(path, backup_path)
 
-    def load_drift_metrics(self) -> Optional[pd.DataFrame]:
-        path = self._path(self.config.drift_file)
-        if os.path.exists(path):
-            return pd.read_csv(path)
-        return None
+                # Atomic move
+                os.rename(temp_path, path)
 
-    def save_target_weights(self, df: pd.DataFrame):
-        """Save target weights (code, weight)."""
-        df.to_csv(self._path(self.config.target_weights_file), index=False)
+            except Exception as e:
+                # Clean up temp file on error
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                raise e
 
-    def load_target_weights(self) -> pd.DataFrame:
-        """Load target weights (code, weight)."""
-        path = self._path(self.config.target_weights_file)
-        if os.path.exists(path):
-            return pd.read_csv(path)
-        return pd.DataFrame(columns=['code', 'weight'])
+    def load(self, path: str) -> bool:
+        """Load state from file with validation"""
+        if not os.path.exists(path):
+            return False
 
-    def save_orders(self, df: pd.DataFrame):
-        """Save orders (code, side, shares)."""
-        df.to_csv(self._path(self.config.orders_file), index=False)
+        with self._lock:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    state_data = json.load(f)
 
-    def load_orders(self) -> pd.DataFrame:
-        """Load orders (code, side, shares)."""
-        path = self._path(self.config.orders_file)
-        if os.path.exists(path):
-            return pd.read_csv(path)
-        return pd.DataFrame(columns=['code', 'side', 'shares'])
+                # Validate checksum
+                if 'checksum' in state_data:
+                    data_copy = state_data.copy()
+                    expected_checksum = data_copy.pop('checksum')
+                    data_str = json.dumps(data_copy, sort_keys=True, default=str)
+                    actual_checksum = hashlib.sha256(data_str.encode()).hexdigest()
 
-    def save_model_ic(self, df: pd.DataFrame):
-        """Save per-model IC metrics (date, model, ic)."""
-        path = self._path(self.config.model_ic_file)
-        if os.path.exists(path):
-            existing = pd.read_csv(path)
-            df = pd.concat([existing, df], ignore_index=True)
-            df = df.drop_duplicates(subset=['date', 'model'], keep='last')
-        df.to_csv(path, index=False)
+                    if actual_checksum != expected_checksum:
+                        raise ValueError("Data integrity check failed")
 
-    def load_model_ic(self) -> Optional[pd.DataFrame]:
-        """Load per-model IC metrics."""
-        path = self._path(self.config.model_ic_file)
-        if os.path.exists(path):
-            return pd.read_csv(path)
-        return None
+                # Load data
+                if 'positions' in state_data:
+                    self.positions = pd.DataFrame(state_data['positions'])
 
-    def set_retrain_flag(self):
-        """Create retrain.flag file."""
-        flag_path = self._path(self.config.retrain_flag_file)
-        with open(flag_path, 'w') as f:
-            f.write(f"{datetime.now().isoformat()}\n")
+                if 'orders' in state_data:
+                    self.orders = pd.DataFrame(state_data['orders'])
 
-    def clear_retrain_flag(self):
-        """Remove retrain.flag file."""
-        flag_path = self._path(self.config.retrain_flag_file)
-        if os.path.exists(flag_path):
-            os.remove(flag_path)
+                if 'nav' in state_data:
+                    self.nav = state_data['nav']
 
-    def has_retrain_flag(self) -> bool:
-        """Check if retrain.flag exists."""
-        return os.path.exists(self._path(self.config.retrain_flag_file))
+                return True
+
+            except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+                # Try loading from backup if available
+                backup_path = path + '.backup'
+                if os.path.exists(backup_path):
+                    try:
+                        return self.load(backup_path)
+                    except:
+                        pass
+                return False
+
+    def backup(self, backup_dir: str):
+        """Create timestamped backup"""
+        with self._lock:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_path = os.path.join(backup_dir, f'state_backup_{timestamp}.json')
+
+            # Ensure backup directory exists
+            os.makedirs(backup_dir, exist_ok=True)
+
+            # Save to backup location
+            self.save(backup_path)
+
+    def restore_from_backup(self, backup_path: str) -> bool:
+        """Restore state from backup file"""
+        return self.load(backup_path)
+
+    def clear(self):
+        """Clear all state data"""
+        with self._lock:
+            self.positions = pd.DataFrame(columns=["code","shares","avg_price","weight"])
+            self.orders = pd.DataFrame(columns=["order_id","code","side","shares","status"])
+            self.nav = []
+
+    def get_state_summary(self) -> Dict[str, Any]:
+        """Get summary of current state"""
+        with self._lock:
+            return {
+                'position_count': len(self.positions),
+                'order_count': len(self.orders),
+                'nav_entries': len(self.nav),
+                'total_value': self.positions['shares'].sum() if not self.positions.empty else 0,
+                'last_update': self.nav[-1]['ts'] if self.nav else None
+            }

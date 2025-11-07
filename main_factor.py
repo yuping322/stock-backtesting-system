@@ -138,7 +138,7 @@ def save_single_factor_results(output_dir, factor_name, factor_results):
         scores_df.to_csv(period_dir / 'scores.csv', index=False)
 
 
-def save_factor_plots(output_dir, factor_name):
+def save_factor_plots(output_dir, factor_name, tester=None):
     """保存单个因子的图表"""
     import matplotlib.pyplot as plt
     
@@ -149,16 +149,113 @@ def save_factor_plots(output_dir, factor_name):
     factor_dir.mkdir(parents=True, exist_ok=True)
     
     # 保存所有打开的图表
+    # 关键：alphalens 生成多个图表（通常是 2 个），第一个可能是空的（7-8KB），
+    #      第二个才有完整内容（700KB+），必须保存所有图表
+    # 使用 notebook 风格的保存方式，确保图表完整渲染
     plot_count = 0
-    for i, fig in enumerate(plt.get_fignums()):
-        plt.figure(fig)
-        save_path = factor_dir / f'plot_{i+1}.png'
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plot_count += 1
-        print(f"  ✓ 已保存图片: {save_path}")
+    saved_fig_nums = set()
+    
+    # 获取所有图表编号（包括当前的和已保存的）
+    # 重要：优先使用 factor.py 中保存的图表对象引用
+    saved_fig_objects = {}
+    if tester and hasattr(tester, '_saved_fig_objects'):
+        saved_fig_objects = tester._saved_fig_objects
+        print(f"  从 tester 获取保存的图表对象: {len(saved_fig_objects)} 个")
+    
+    current_figs = plt.get_fignums()
+    
+    # 重要：合并所有图表编号（包括当前的和已保存的）
+    # alphalens 通常生成 2 个图表：第一个是空的，第二个有内容
+    all_figs = sorted(set(current_figs) | set(saved_fig_objects.keys()))
+    
+    if not all_figs:
+        print(f"  ⚠️  未找到任何图表，可能已被清除")
+        return
+    
+    for i, fig_num in enumerate(all_figs, 1):
+        try:
+            # 跳过已经保存的图表
+            if fig_num in saved_fig_nums:
+                continue
+            
+            # 优先使用保存的图表对象（如果存在）
+            if fig_num in saved_fig_objects:
+                fig = saved_fig_objects[fig_num]
+                print(f"  使用保存的图表对象 {fig_num}")
+            else:
+                # 否则尝试从当前图表获取
+                try:
+                    fig = plt.figure(fig_num)
+                except Exception as e:
+                    print(f"  ⚠️  无法获取图表 {fig_num}: {e}")
+                    continue
+            
+            # 确保图表完全渲染（重要：确保所有内容都被绘制）
+            # 这相当于 notebook 中的自动渲染
+            fig.canvas.draw()
+            
+            # 保存图表（使用 notebook 风格的保存方式）
+            save_path = factor_dir / f'plot_{i}.png'
+            
+            # 使用 figure.savefig（推荐，与 notebook 一致）
+            fig.savefig(
+                save_path, 
+                dpi=200,  # 提高分辨率
+                bbox_inches='tight', 
+                facecolor='white',  # 设置背景为白色
+                edgecolor='none',  # 无边框
+                format='png',
+                pad_inches=0.1,  # 添加少量内边距
+                transparent=False  # 不透明背景（确保白色背景）
+            )
+            
+            # 验证文件是否成功保存
+            if save_path.exists() and save_path.stat().st_size > 0:
+                file_size = save_path.stat().st_size / 1024
+                
+                # 检查图表是否有实际内容（非白色像素 > 1000 或文件大小 > 10KB）
+                try:
+                    from PIL import Image
+                    import numpy as np
+                    img = Image.open(save_path)
+                    arr = np.array(img)
+                    non_white = np.sum(~np.all(arr[:, :, :3] > 240, axis=2))
+                    total = arr.shape[0] * arr.shape[1]
+                    has_content = non_white > 1000 or file_size > 10
+                except:
+                    # 如果检查失败，假设有内容
+                    has_content = file_size > 10
+                    non_white = 0
+                    total = 1
+                
+                # 只保存有内容的图表
+                if has_content:
+                    plot_count += 1
+                    saved_fig_nums.add(fig_num)
+                    
+                    # 检查文件大小，如果很大说明有内容
+                    if file_size > 100:
+                        print(f"  ✓ 已保存图片 {i}: {save_path} ({file_size:.1f} KB) ✅ 有完整内容")
+                    elif file_size > 10:
+                        print(f"  ✓ 已保存图片 {i}: {save_path} ({file_size:.1f} KB)")
+                    else:
+                        print(f"  ✓ 已保存图片 {i}: {save_path} ({file_size:.1f} KB)")
+                else:
+                    # 跳过空的图表
+                    save_path.unlink()  # 删除空图表文件
+                    print(f"  ⚠️  跳过图片 {i} (图表 {fig_num}): 内容为空，已删除")
+            else:
+                print(f"  ⚠️  图片 {i} 保存失败或文件为空")
+                
+        except Exception as e:
+            print(f"  ⚠️  保存图表 {i} 失败: {e}")
+            import traceback
+            traceback.print_exc()
     
     if plot_count > 0:
         print(f"✓ 因子 {factor_name} 已保存 {plot_count} 张图片")
+    else:
+        print(f"⚠️  因子 {factor_name} 未保存任何图片（可能没有生成图表）")
     
     plt.close('all')
 
@@ -429,11 +526,30 @@ def main():
     # 决定是否画图
     should_plot = args.plot == 'true'
     
-    # 如果是保存模式，设置 matplotlib 为非交互后端
-    if should_plot and args.plot_mode == 'save':
+    # 设置 matplotlib 后端（根据模式选择）
+    # 注意：alphalens 需要交互式 backend 才能正确生成图表
+    # 所以即使是要保存文件，也要先使用交互式 backend 生成，然后保存
+    if should_plot:
         import matplotlib
-        matplotlib.use('Agg')  # 非交互后端，不会弹窗
-        print("✓ 已设置画图为非交互模式（保存到文件）")
+        import sys
+        
+        # 优先使用交互式 backend（alphalens 需要）
+        try:
+            if sys.platform == 'darwin':
+                matplotlib.use('macosx', force=True)
+            elif sys.platform.startswith('linux'):
+                matplotlib.use('TkAgg', force=True)
+            else:
+                matplotlib.use('TkAgg', force=True)
+            
+            if args.plot_mode == 'save':
+                print("✓ 使用交互式 backend 生成图表（保存模式）")
+            else:
+                print("✓ 已设置画图为交互模式（弹窗显示）")
+        except Exception as e:
+            # 如果交互式后端不可用，回退到 Agg（但图表可能无法正确生成）
+            matplotlib.use('Agg', force=True)
+            print(f"⚠️  无法使用交互式后端，回退到 Agg（图表可能无法正确生成）: {e}")
         print()
     
     # 逐因子处理，避免内存问题
@@ -461,8 +577,9 @@ def main():
                 print(f"✓ 因子 {factor_name} 报告已生成")
             
             # 保存该因子的图片（如果启用了画图）
+            # 重要：传递 tester 对象，以便获取保存的图表对象引用
             if should_plot and args.plot_mode == 'save':
-                save_factor_plots(output_dir, factor_name)
+                save_factor_plots(output_dir, factor_name, tester=tester)
             
             # 清理内存（删除因子数据）
             del factor_results
@@ -505,9 +622,32 @@ def main():
     
     # 处理剩余图表（popup 模式）
     if should_plot and args.plot_mode == 'popup':
+        import matplotlib
         import matplotlib.pyplot as plt
+        
+        # 尝试使用交互式后端（如果可用）
+        try:
+            # 检查当前后端是否支持显示
+            if matplotlib.get_backend() == 'Agg':
+                # 如果当前是 Agg 后端，尝试切换到交互式后端
+                # 在 macOS 上使用 macosx，在 Linux 上使用 TkAgg
+                import sys
+                if sys.platform == 'darwin':
+                    matplotlib.use('macosx')
+                elif sys.platform.startswith('linux'):
+                    matplotlib.use('TkAgg')
+                else:
+                    matplotlib.use('TkAgg')
+        except Exception as e:
+            print(f'⚠️  无法切换到交互式后端，使用当前后端: {e}')
+        
+        # 显示所有图表
         print("\n显示图表（关闭窗口继续）...")
-        plt.show()
+        try:
+            plt.show()
+        except Exception as e:
+            print(f'⚠️  无法显示图表: {e}')
+            print('   提示：如果需要在无GUI环境中运行，请使用 --plot-mode save')
     
     print("\n全部完成！")
 

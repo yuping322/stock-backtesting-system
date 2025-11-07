@@ -3,6 +3,11 @@
 #  单因子 / 多因子 Alphalens 一键检验 + 自动打分脚本
 #  适用平台：JoinQuant / RiceQuant 等支持 JQData 的环境
 # ===========================================================
+# 注意：不在这里设置 Agg backend，因为 alphalens 需要交互式 backend 才能正确生成图表
+# 如果需要在无 GUI 环境运行，可以在调用方根据实际情况设置 backend
+import matplotlib
+# matplotlib.use('Agg')  # 注释掉，让 matplotlib 自动选择 backend（通常是交互式的）
+
 import alphalens as al
 import pandas as pd
 import numpy as np
@@ -969,12 +974,126 @@ class FactorTester:
         
         if plot:
             try:
-                al.tears.create_full_tear_sheet(clean,
-                                                long_short=True,
-                                                group_neutral=True,
-                                                by_group=True)
+                # 导入 matplotlib
+                import matplotlib
+                import matplotlib.pyplot as plt
+                
+                # 关键：确保使用交互式 backend（alphalens 需要）
+                # 如果当前是 Agg backend，临时切换到交互式 backend
+                current_backend = matplotlib.get_backend()
+                if current_backend == 'Agg':
+                    import sys
+                    if sys.platform == 'darwin':
+                        matplotlib.use('macosx', force=True)
+                    elif sys.platform.startswith('linux'):
+                        matplotlib.use('TkAgg', force=True)
+                    else:
+                        matplotlib.use('TkAgg', force=True)
+                    print(f'  切换 backend 从 {current_backend} 到 {matplotlib.get_backend()} 以生成图表')
+                
+                # 清除之前的图表（避免内存泄漏）
+                plt.close('all')
+                
+                # 关键：拦截 plt.show() 调用，在调用时立即保存图表
+                # alphalens 内部调用 plt.show() 时，图表可能被清除
+                # 解决方案：在 plt.show() 调用时立即保存所有图表到临时位置
+                saved_fig_nums = set()
+                saved_fig_objects = {}  # 保存 figure 对象的引用
+                original_show = plt.show
+                
+                def save_and_mock_show(*args, **kwargs):
+                    # 在 plt.show() 调用时，立即保存所有未保存的图表
+                    # 注意：alphalens 可能生成多个图表，第一个可能是空的
+                    current_figs = plt.get_fignums()
+                    for fig_num in current_figs:
+                        if fig_num not in saved_fig_nums:
+                            try:
+                                fig = plt.figure(fig_num)
+                                # 确保图表完全渲染
+                                fig.canvas.draw()
+                                # 保存 figure 对象的引用（避免被清除）
+                                saved_fig_objects[fig_num] = fig
+                                saved_fig_nums.add(fig_num)
+                            except Exception as e:
+                                print(f'  保存图表 {fig_num} 时出错: {e}')
+                    # 不实际显示
+                    pass
+                
+                plt.show = save_and_mock_show
+                
+                try:
+                    # 生成 tear-sheet（使用交互式 backend，确保正确生成）
+                    # 注意：group_neutral=True 和 by_group=True 可能导致错误，如果出错会回退到 False
+                    try:
+                        al.tears.create_full_tear_sheet(clean,
+                                                        long_short=True,
+                                                        group_neutral=True,
+                                                        by_group=True)
+                    except Exception as e:
+                        # 如果 group_neutral/by_group 出错，尝试不使用这些选项
+                        print(f'  使用 group_neutral/by_group 时出错: {e}')
+                        print(f'  尝试使用更简单的配置...')
+                        al.tears.create_full_tear_sheet(clean,
+                                                        long_short=True,
+                                                        group_neutral=False,
+                                                        by_group=False)
+                except Exception as e:
+                    # 即使 tear-sheet 生成出错，也可能已经生成了一些图表
+                    print(f'  tear-sheet 生成时出错: {e}')
+                    print(f'  但已捕获的图表: {list(saved_fig_objects.keys())}')
+                finally:
+                    # 重要：在恢复 plt.show 之前，确保所有图表都被捕获
+                    # 再次检查是否有新的图表出现
+                    current_figs = plt.get_fignums()
+                    for fig_num in current_figs:
+                        if fig_num not in saved_fig_nums:
+                            try:
+                                fig = plt.figure(fig_num)
+                                fig.canvas.draw()
+                                saved_fig_objects[fig_num] = fig
+                                saved_fig_nums.add(fig_num)
+                            except:
+                                pass
+                    
+                    # 恢复 plt.show
+                    plt.show = original_show
+                    
+                    # 重要：确保所有图表都被渲染（即使出错了）
+                    # 使用保存的 figure 对象引用，确保图表不被清除
+                    all_fig_nums = set(plt.get_fignums()) | set(saved_fig_objects.keys())
+                    for fig_num in all_fig_nums:
+                        try:
+                            if fig_num in saved_fig_objects:
+                                fig = saved_fig_objects[fig_num]
+                            else:
+                                fig = plt.figure(fig_num)
+                            fig.canvas.draw()  # 强制渲染
+                        except:
+                            pass
+                
+                # 检查生成的图表数量（包括保存的图表）
+                current_figs = plt.get_fignums()
+                all_figs = set(current_figs) | set(saved_fig_objects.keys())
+                figs_count = len(all_figs)
+                
+                if figs_count > 0:
+                    print(f'✅ {factor_name} tear-sheet 生成成功，共 {figs_count} 个图表')
+                else:
+                    print(f'⚠️  {factor_name} tear-sheet 未生成任何图表')
+                
+                # 提示：alphalens 可能生成多个图表，第一个可能是空的
+                # 调用方需要保存所有图表，不要只保存第一个
+                
+                # 重要：将保存的图表对象保存到实例变量，供调用方使用
+                # 注意：必须保存字典的副本，避免引用被修改
+                self._saved_fig_objects = dict(saved_fig_objects)
+                
+                # 注意：图表已经生成，但可能不会显示（取决于 backend）
+                # 如果需要保存图片，应该在调用方使用 plt.savefig() 或 plt.get_fignums()
             except Exception as e:
                 print(f'⚠️  {factor_name} tear-sheet 异常：{e}')
+                import traceback
+                traceback.print_exc()
         else:
             print(f'📊 {factor_name} 跳过 tear-sheet（未启用画图）')
 
