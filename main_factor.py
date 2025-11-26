@@ -64,6 +64,8 @@ def parse_main_args():
                        help='回测结束日期 (YYYY-MM-DD)')
     parser.add_argument('--stock-pool', type=str, default='small',
                        help='股票池：指数代码 或 "stock"（全市场）')
+    parser.add_argument('--max-stocks', type=int, default=None,
+                       help='最大股票数量限制（用于测试，减少计算量）')
     parser.add_argument('--factors', nargs='+', default=['VOL10', 'single_day_VPT_12'],
                        help='要检验的因子列表')
     parser.add_argument('--quantiles', type=int, default=10,
@@ -458,6 +460,7 @@ def main():
         start = args.start
         end = args.end
         stock_pool = args.stock_pool
+        max_stocks = args.max_stocks
         factors = args.factors
         quantiles = args.quantiles
         periods = args.periods

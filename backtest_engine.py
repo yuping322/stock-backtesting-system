@@ -445,6 +445,7 @@ class StrategyFactory:
         "weighted_top_n": WeightedTopNStrategy,
         "equal_weight": EqualWeightStrategy,
         "direct_execution": DirectExecutionStrategy,
+        "limit_up_gene": None,  # Will be imported dynamically
     }
     
     @classmethod
@@ -452,6 +453,15 @@ class StrategyFactory:
         """获取策略类"""
         if strategy_name not in cls._strategies:
             raise ValueError(f"不支持的策略: {strategy_name}. 可选策略: {list(cls._strategies.keys())}")
+        
+        # Dynamic import for limit_up_gene
+        if strategy_name == "limit_up_gene" and cls._strategies[strategy_name] is None:
+            try:
+                from jq_backtest_strategy import LimitUpGeneStrategy
+                cls._strategies[strategy_name] = LimitUpGeneStrategy
+            except ImportError as e:
+                raise ValueError(f"无法导入策略 {strategy_name}: {e}")
+        
         return cls._strategies[strategy_name]
     
     @classmethod

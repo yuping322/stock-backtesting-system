@@ -438,6 +438,11 @@ def load_oss_stocks(
             else:
                 LOGGER.debug("缓存命中: %s", object_name)
                 
+            # 检查内容是否为空
+            if not content or len(content.strip()) == 0:
+                LOGGER.warning("股票 %s 的 CSV 文件为空", code)
+                continue
+                
         except NO_SUCH_KEY_ERROR:
             LOGGER.warning("OSS 未找到股票 %s 的日线数据", code)
             continue
@@ -453,6 +458,9 @@ def load_oss_stocks(
             message = f"股票 {code} 的 CSV 解析失败: {exc}"
             LOGGER.error(message)
             raise ValueError(message) from exc
+        except pd.errors.EmptyDataError:
+            LOGGER.warning("股票 %s 的 CSV 文件无数据", code)
+            continue
 
         # 日期、价格列统一命名
         df["date"] = pd.to_datetime(df["日期"])
@@ -519,13 +527,9 @@ def load_oss_complex_stocks(
 
     # ---------------- 股票代码过滤 ----------------
     normalized_codes = _normalize_code_arg(codes)
-    if normalized_codes is None:
-        LOGGER.warning("load_oss_complex_stocks 未提供 codes，返回空结果")
-        if isinstance(fields, str) and fields.lower() == "all":
-            return {}
-        if isinstance(fields, list):
-            return {}
-        return pd.DataFrame(dtype=float)
+    if normalized_codes is None or (isinstance(normalized_codes, list) and len(normalized_codes) == 0):
+        # 如果 codes 为空，取全量 A 股
+        normalized_codes = get_index_stocks("A")
 
     # ---------------- 遍历 OSS 目录 ----------------
     prefix = "hangqing/daily_data/"
@@ -534,14 +538,34 @@ def load_oss_complex_stocks(
     for code in normalized_codes:
         try:
             fname = _ensure_exchange_prefix(code) + ".csv"
-            content = bucket.get_object(prefix + fname).read()
+            object_name = prefix + fname
+            
+            # 尝试从缓存获取
+            cache_key = _get_cache_key("complex_stocks", object_name)
+            content = _get_from_cache(cache_key)
+            
+            if content is None:
+                # 缓存未命中，从OSS读取
+                content = bucket.get_object(object_name).read()
+                # 存入缓存
+                _put_to_cache(cache_key, content)
+                LOGGER.debug("缓存未命中，从OSS读取: %s", object_name)
+            else:
+                LOGGER.debug("缓存命中: %s", object_name)
+                
+            # 检查内容是否为空
+            if not content or len(content.strip()) == 0:
+                LOGGER.warning("股票 %s 的 CSV 文件为空", code)
+                continue
+                
         except NO_SUCH_KEY_ERROR:
             LOGGER.warning("OSS 未找到股票 %s 的日线数据", code)
             continue
         except OSS_GENERIC_ERROR as exc:
             message = f"下载股票 {code} 的日线数据失败"
             LOGGER.error(message, exc_info=exc)
-            raise ConnectionError(message) from exc
+            continue
+            # raise ConnectionError(message) from exc
 
         try:
             df = pd.read_csv(io.BytesIO(content),
@@ -549,7 +573,11 @@ def load_oss_complex_stocks(
         except pd.errors.ParserError as exc:
             message = f"股票 {code} 的 CSV 解析失败: {exc}"
             LOGGER.error(message)
-            raise ValueError(message) from exc
+            # raise ValueError(message) from exc
+            continue
+        except pd.errors.EmptyDataError:
+            LOGGER.warning("股票 %s 的 CSV 文件无数据", code)
+            continue
 
         # 日期、价格列统一命名
         df["date"] = pd.to_datetime(df["日期"])

@@ -12,6 +12,13 @@ import numpy as np
 from typing import Callable, Dict, List, Optional, Union
 from abc import ABC, abstractmethod
 
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    talib = None
+    TALIB_AVAILABLE = False
+
 
 class FactorCalculator(ABC):
     """因子计算器基类"""
@@ -24,7 +31,10 @@ class FactorCalculator(ABC):
         Args:
             stock_code: 股票代码
             start_date: 开始日期
-            end_date: 结束日期
+                    'MINUS_DM': ['high', 'low'],  # 负向运动 - 不需要volume和close
+            'PLUS_DM': ['high', 'low'],  # 正向运动 - 不需要volume和close         'MINUS_DM': ['high', 'low'],  # 负向运动 - 不需要volume和close
+            'PLUS_DM': ['high', 'low'],  # 正向运动 - 不需要volume和close         'MINUS_DM': ['high', 'low'],  # 负向运动 - 不需要close
+            'PLUS_DM': ['high', 'low'],  # 正向运动 - 不需要close    end_date: 结束日期
             
         Returns:
             pd.Series: 因子值序列，索引为日期
@@ -283,12 +293,19 @@ class BuiltinFactorCalculator(FactorCalculator):
             factor_name: 因子名称
             data_loader: 数据加载器
         """
-        if factor_name not in self.BUILTIN_FACTORS:
+        # 检查是否是 TALIB 因子
+        if factor_name.startswith('TALIB_'):
+            self.factor_name = factor_name
+            self.is_talib = True
+            self.talib_func_name, self.talib_params = self._parse_talib_factor_name(factor_name)
+            self.data_loader = data_loader
+        elif factor_name not in self.BUILTIN_FACTORS:
             raise ValueError(f"未知的内置因子: {factor_name}")
-        
-        self.factor_name = factor_name
-        self.factor_func = self.BUILTIN_FACTORS[factor_name]
-        self.data_loader = data_loader
+        else:
+            self.factor_name = factor_name
+            self.factor_func = self.BUILTIN_FACTORS[factor_name]
+            self.is_talib = False
+            self.data_loader = data_loader
     
     def calculate(self, stock_code: str, start_date: str, end_date: str) -> pd.Series:
         """计算因子值"""
@@ -299,7 +316,10 @@ class BuiltinFactorCalculator(FactorCalculator):
             return pd.Series(dtype=float)
         
         # 计算因子
-        factor_values = self.factor_func(ohlcv_data)
+        if self.is_talib:
+            factor_values = self._calculate_talib_factor(ohlcv_data)
+        else:
+            factor_values = self.factor_func(ohlcv_data)
         
         return factor_values
     
@@ -334,11 +354,424 @@ class BuiltinFactorCalculator(FactorCalculator):
                 if ohlcv_data:
                     result_df = pd.DataFrame(ohlcv_data)
                     return result_df
-            
-            return pd.DataFrame()
+                
+                return pd.DataFrame()
+            else:
+                return pd.DataFrame()
         except Exception as e:
             print(f"加载数据失败 {stock_code}: {e}")
             return pd.DataFrame()
+    
+    def _get_talib_min_periods(self) -> int:
+        """获取 TALIB 函数的最小周期要求"""
+        # 基于 TA-Lib 文档和常见用法定义最小周期
+        min_periods_map = {
+            # 移动平均类
+            'SMA': 2,  # 简单移动平均
+            'EMA': 2,  # 指数移动平均
+            'DEMA': 2,  # 双重指数移动平均
+            'TEMA': 2,  # 三重指数移动平均
+            'WMA': 2,  # 加权移动平均
+            'KAMA': 30,  # 考夫曼自适应移动平均
+            'MAMA': 32,  # MESA自适应移动平均
+            'T3': 2,  # T3移动平均
+            'TRIX': 2,  # 三重指数平滑移动平均
+            'TRIMA': 2,  # 三角移动平均
+            'MA': 2,  # 所有移动平均
+            
+            # 动量指标
+            'RSI': 14,  # 相对强弱指数
+            'STOCH': 14,  # 随机指标 (K,D周期)
+            'STOCHF': 14,  # 快速随机指标
+            'STOCHRSI': 14,  # 随机强弱指标
+            'WILLR': 14,  # 威廉指标
+            'CCI': 20,  # 商品通道指数
+            'MOM': 10,  # 动量
+            'ROC': 10,  # 变动率
+            'ROCP': 10,  # 变动率百分比
+            'ROCR': 10,  # 变动率比率
+            'ROCR100': 10,  # 变动率比率100
+            'CMO': 14,  # 钱德动量振荡器
+            'MACD': 26,  # MACD (默认26周期)
+            'MACDEXT': 26,  # MACD扩展
+            'MACDFIX': 26,  # MACD固定
+            'APO': 26,  # 绝对价格震荡器
+            'PPO': 26,  # 百分比价格震荡器
+            
+            # 波动率指标
+            'ATR': 14,  # 平均真实波幅
+            'NATR': 14,  # 归一化平均真实波幅
+            'TRANGE': 2,  # 真实波幅
+            'VAR': 5,  # 方差
+            'STDDEV': 5,  # 标准差
+            'AVGDEV': 2,  # 平均偏差
+            
+            # 趋向指标
+            'ADX': 14,  # 平均趋向指数
+            'ADXR': 14 + 14,  # 平均趋向指数评级 (ADX周期 + 额外周期) = 28, 但实际上需要更长
+            'DX': 14,  # 趋向指数
+            'MINUS_DI': 14,  # 负向指标
+            'MINUS_DM': 14,  # 负向运动
+            'PLUS_DI': 14,  # 正向指标
+            'PLUS_DM': 14,  # 正向运动
+            
+            # 布林带
+            'BBANDS': 20,  # 布林带 (默认20周期)
+            
+            # 阿隆指标
+            'AROON': 14,  # 阿隆指标
+            'AROONOSC': 14,  # 阿隆振荡器
+            
+            # 其他
+            'OBV': 2,  # 能量潮
+            'AD': 2,  # 累积/派发线
+            'ADOSC': 3,  # 震荡指标 (默认3,10)
+            'MFI': 14,  # 资金流量指数
+            'IMI': 14,  # 内部动量指数
+            'BALANCE': 2,  # 平衡量
+            'AVGPRICE': 2,  # 平均价格
+            'MEDPRICE': 2,  # 中间价格
+            'TYPPRICE': 2,  # 典型价格
+            'WCLPRICE': 2,  # 加权收盘价
+            'MIDPOINT': 2,  # 中点
+            'MIDPRICE': 2,  # 中间价格
+            'MINMAX': 2,  # 最小最大
+            'MINMAXINDEX': 2,  # 最小最大索引
+            
+            # 希尔伯特变换
+            'HT_DCPERIOD': 32,  # 希尔伯特变换-主导周期
+            'HT_DCPHASE': 64,  # 希尔伯特变换-主导阶段
+            'HT_PHASOR': 32,  # 希尔伯特变换-相量组件
+            'HT_SINE': 64,  # 希尔伯特变换-正弦波
+            'HT_TRENDMODE': 64,  # 希尔伯特变换-趋势模式
+            
+            # 线性回归
+            'LINEARREG': 2,  # 线性回归
+            'LINEARREG_ANGLE': 2,  # 线性回归角度
+            'LINEARREG_INTERCEPT': 2,  # 线性回归截距
+            'LINEARREG_SLOPE': 2,  # 线性回归斜率
+            'TSF': 2,  # 时间序列预测
+            
+            # 其他高级指标
+            'BETA': 30,  # Beta系数
+            'CORREL': 30,  # 相关系数
+            'ACCBANDS': 14,  # 加速带 - 需要至少 timeperiod 个周期
+        }
+        
+        # 特殊处理 ADXR - 它基于 ADX，需要更长的预热期
+        if self.talib_func_name.upper() == 'ADXR':
+            # ADXR 是 ADX 的平滑版本，需要 ADX 的周期加上额外的平滑周期
+            # 通常 ADX 使用 14 周期，ADXR 使用额外的 14 周期进行平滑
+            # 测试显示需要约50个数据点才能开始产生有效值
+            return 50  # 基于实际测试结果调整
+        
+        return min_periods_map.get(self.talib_func_name.upper(), 2)  # 默认最少2个周期
+    
+    def _parse_talib_factor_name(self, factor_name: str):
+        """解析 TALIB 因子名称，返回函数名和参数"""
+        if not factor_name.startswith('TALIB_'):
+            raise ValueError(f"不是 TALIB 因子: {factor_name}")
+        
+        # 去掉 TALIB_ 前缀
+        talib_part = factor_name[6:]  # 'TALIB_ACCBANDS_14' -> 'ACCBANDS_14'
+        
+        # 分割函数名和参数
+        parts = talib_part.split('_')
+        
+        # 特殊处理复合函数名
+        if talib_part.startswith('HT_'):
+            # HT_DCPERIOD, HT_DCPHASE, HT_PHASOR, HT_SINE, HT_TRENDMODE
+            func_name = '_'.join(parts[:2])  # HT_DCPERIOD
+            params = parts[2:]
+        elif talib_part.startswith('MINUS_'):
+            # MINUS_DI, MINUS_DM
+            func_name = '_'.join(parts[:2])  # MINUS_DI
+            params = parts[2:]
+        elif talib_part.startswith('PLUS_'):
+            # PLUS_DI, PLUS_DM
+            func_name = '_'.join(parts[:2])  # PLUS_DI
+            params = parts[2:]
+        elif talib_part.startswith('LINEARREG_'):
+            # LINEARREG_ANGLE, LINEARREG_INTERCEPT, LINEARREG_SLOPE
+            func_name = '_'.join(parts[:2])  # LINEARREG_ANGLE
+            params = parts[2:]
+        else:
+            # 普通函数名
+            func_name = parts[0]
+            params = parts[1:]
+        
+        # 解析参数
+        parsed_params = []
+        for part in params:
+            try:
+                # 尝试转换为数字
+                if '.' in part:
+                    parsed_params.append(float(part))
+                else:
+                    parsed_params.append(int(part))
+            except ValueError:
+                # 如果不是数字，保持字符串
+                parsed_params.append(part)
+        
+        return func_name, parsed_params
+    
+    def _calculate_talib_factor(self, ohlcv_data: pd.DataFrame) -> pd.Series:
+        """计算 TALIB 因子"""
+        if not TALIB_AVAILABLE:
+            raise ImportError("需要安装 TA-Lib: pip install TA-Lib")
+        
+        # 获取 TALIB 函数
+        talib_func = getattr(talib, self.talib_func_name.upper(), None)
+        if talib_func is None:
+            raise ValueError(f"未知的 TALIB 函数: {self.talib_func_name}")
+        
+        # 检查数据长度是否足够
+        min_periods = self._get_talib_min_periods()
+        if len(ohlcv_data) < min_periods:
+            print(f"⚠️  警告：数据长度 {len(ohlcv_data)} 不足以计算 {self.talib_func_name} (需要至少 {min_periods} 个数据点)")
+            return pd.Series(dtype=float)
+        
+        # 准备输入数据
+        # TALIB 函数通常需要 numpy arrays，根据函数名确定需要的参数
+        inputs = {}
+        
+        # 常见的参数映射 - 指定每个函数需要的参数
+        param_mapping = {
+            'AD': ['high', 'low', 'close', 'volume'],
+            'ADOSC': ['high', 'low', 'close', 'volume'],
+            'OBV': ['close', 'volume'],
+            'MFI': ['high', 'low', 'close', 'volume'],
+            'RSI': ['close'],  # RSI 只需收盘价
+            'MACD': ['close'],  # MACD 只需收盘价
+            'SMA': ['close'],  # 简单移动平均
+            'EMA': ['close'],  # 指数移动平均
+            'BBANDS': ['close'],  # 布林带
+            'STOCH': ['high', 'low', 'close'],  # 随机指标
+            'STOCHF': ['high', 'low', 'close'],  # 快速随机指标
+            'STOCHRSI': ['close'],  # 随机强弱指标
+            'WILLR': ['high', 'low', 'close'],  # 威廉指标
+            'CCI': ['high', 'low', 'close'],  # 商品通道指数
+            'ATR': ['high', 'low', 'close'],  # 平均真实波幅
+            'NATR': ['high', 'low', 'close'],  # 归一化平均真实波幅
+            'ROC': ['close'],  # 变动率
+            'ROCP': ['close'],  # 变动率百分比
+            'ROCR': ['close'],  # 变动率比率
+            'ROCR100': ['close'],  # 变动率比率100
+            'MOM': ['close'],  # 动量
+            'TSF': ['close'],  # 时间序列预测
+            'VAR': ['close'],  # 方差
+            'STDDEV': ['close'],  # 标准差
+            'BETA': ['close'],  # Beta系数（通常需要基准）
+            'CORREL': ['close'],  # 相关系数（通常需要两组数据）
+            'LINEARREG': ['close'],  # 线性回归
+            'LINEARREG_ANGLE': ['close'],  # 线性回归角度
+            'LINEARREG_INTERCEPT': ['close'],  # 线性回归截距
+            'LINEARREG_SLOPE': ['close'],  # 线性回归斜率
+            'TSF': ['close'],  # 时间序列预测
+            'TEMA': ['close'],  # 三重指数移动平均
+            'TRIMA': ['close'],  # 三角移动平均
+            'WMA': ['close'],  # 加权移动平均
+            'DEMA': ['close'],  # 双重指数移动平均
+            'KAMA': ['close'],  # 考夫曼自适应移动平均
+            'MAMA': ['close'],  # MESA自适应移动平均
+            'T3': ['close'],  # T3移动平均
+            'TRIX': ['close'],  # 三重指数平滑移动平均
+            'ACCBANDS': ['high', 'low', 'close'],  # 加速带 - 不需要volume
+            'APO': ['close'],  # 绝对价格震荡器
+            'PPO': ['close'],  # 百分比价格震荡器
+            'CMO': ['close'],  # 钱德动量振荡器
+            'AROON': ['high', 'low'],  # 阿隆指标
+            'AROONOSC': ['high', 'low'],  # 阿隆振荡器
+            'BALANCE': ['close'],  # 平衡量
+            'AVGPRICE': ['open', 'high', 'low', 'close'],  # 平均价格
+            'MEDPRICE': ['high', 'low'],  # 中间价格
+            'TYPPRICE': ['high', 'low', 'close'],  # 典型价格
+            'WCLPRICE': ['high', 'low', 'close'],  # 加权收盘价
+            'ADX': ['high', 'low', 'close'],  # 平均趋向指数 - 不需要volume
+            'ADXR': ['high', 'low', 'close'],  # 平均趋向指数评级 - 不需要volume
+            'DX': ['high', 'low', 'close'],  # 趋向指数 - 不需要volume
+            'MINUS_DI': ['high', 'low', 'close'],  # 负向指标 - 不需要volume
+            'MINUS_DM': ['high', 'low'],  # 负向运动 - 不需要volume和close
+            'PLUS_DI': ['high', 'low', 'close'],  # 正向指标 - 不需要volume
+            'PLUS_DM': ['high', 'low'],  # 正向运动 - 不需要volume和close
+            'TRANGE': ['high', 'low', 'close'],  # 真实波幅 - 不需要volume
+            'HT_DCPERIOD': ['close'],  # 希尔伯特变换-主导周期
+            'HT_DCPHASE': ['close'],  # 希尔伯特变换-主导阶段
+            'HT_PHASOR': ['close'],  # 希尔伯特变换-相量组件
+            'HT_SINE': ['close'],  # 希尔伯特变换-正弦波
+            'HT_TRENDMODE': ['close'],  # 希尔伯特变换-趋势模式
+            'AVGDEV': ['close'],  # 平均偏差
+            'MA': ['close'],  # 所有移动平均
+            'MIDPOINT': ['close'],  # 中点
+            'MIDPRICE': ['high', 'low'],  # 中间价格
+            'MINMAX': ['close'],  # 最小最大
+            'MINMAXINDEX': ['close'],  # 最小最大索引
+            'IMI': ['close', 'volume'],  # 内部动量指数
+            'MACDEXT': ['close'],  # MACD扩展
+            'MACDFIX': ['close'],  # MACD固定
+            'MAMA': ['close'],  # MESA自适应移动平均
+        }
+        
+        required_params = param_mapping.get(self.talib_func_name.upper(), ['open', 'high', 'low', 'close', 'volume'])
+        
+        for param in required_params:
+            if param in ohlcv_data.columns:
+                # 确保数据类型为 float64
+                inputs[param] = ohlcv_data[param].values.astype(np.float64)
+        
+        # 调用 TALIB 函数
+        try:
+            if self.talib_params:
+                # 有参数的调用 - 根据函数类型使用不同的参数传递方式
+                func_name_upper = self.talib_func_name.upper()
+                
+                if func_name_upper in ['STOCH']:
+                    # STOCH: fastk_period, slowk_period, slowk_matype, slowd_period, slowd_matype
+                    if len(self.talib_params) >= 5:
+                        result = talib_func(*inputs.values(), 
+                                          fastk_period=self.talib_params[0],
+                                          slowk_period=self.talib_params[1], 
+                                          slowk_matype=self.talib_params[2],
+                                          slowd_period=self.talib_params[3],
+                                          slowd_matype=self.talib_params[4])
+                    elif len(self.talib_params) >= 3:
+                        result = talib_func(*inputs.values(), 
+                                          fastk_period=self.talib_params[0],
+                                          slowk_period=self.talib_params[1], 
+                                          slowd_period=self.talib_params[2])
+                    else:
+                        result = talib_func(*inputs.values(), 
+                                          fastk_period=self.talib_params[0],
+                                          slowk_period=self.talib_params[1], 
+                                          slowd_period=self.talib_params[1])
+                elif func_name_upper in ['STOCHF']:
+                    # STOCHF: fastk_period, fastd_period, fastd_matype
+                    if len(self.talib_params) >= 3:
+                        result = talib_func(*inputs.values(), 
+                                          fastk_period=self.talib_params[0],
+                                          fastd_period=self.talib_params[1],
+                                          fastd_matype=self.talib_params[2])
+                    else:
+                        result = talib_func(*inputs.values(), 
+                                          fastk_period=self.talib_params[0],
+                                          fastd_period=self.talib_params[1])
+                elif func_name_upper in ['STOCHRSI']:
+                    # STOCHRSI: timeperiod, fastk_period, fastd_period, fastd_matype
+                    if len(self.talib_params) >= 4:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0],
+                                          fastk_period=self.talib_params[1],
+                                          fastd_period=self.talib_params[2],
+                                          fastd_matype=self.talib_params[3])
+                    else:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0],
+                                          fastk_period=self.talib_params[1],
+                                          fastd_period=self.talib_params[2])
+                elif func_name_upper in ['T3']:
+                    # T3: timeperiod, vfactor
+                    if len(self.talib_params) >= 2:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0],
+                                          vfactor=self.talib_params[1])
+                    else:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0])
+                elif func_name_upper in ['BBANDS']:
+                    # BBANDS: timeperiod, nbdevup, nbdevdn, matype
+                    if len(self.talib_params) >= 4:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0],
+                                          nbdevup=self.talib_params[1],
+                                          nbdevdn=self.talib_params[2],
+                                          matype=self.talib_params[3])
+                    elif len(self.talib_params) >= 3:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0],
+                                          nbdevup=self.talib_params[1],
+                                          nbdevdn=self.talib_params[2])
+                    else:
+                        result = talib_func(*inputs.values(), 
+                                          timeperiod=self.talib_params[0])
+                elif func_name_upper in ['ACCBANDS']:
+                    # ACCBANDS: timeperiod (只有一个参数)
+                    result = talib_func(*inputs.values(), timeperiod=self.talib_params[0])
+                elif func_name_upper in ['MACD', 'MACDEXT']:
+                    # MACD, MACDEXT: fastperiod, slowperiod, signalperiod
+                    if len(self.talib_params) >= 3:
+                        result = talib_func(*inputs.values(), 
+                                          fastperiod=self.talib_params[0],
+                                          slowperiod=self.talib_params[1],
+                                          signalperiod=self.talib_params[2])
+                    else:
+                        result = talib_func(*inputs.values(), 
+                                          fastperiod=self.talib_params[0],
+                                          slowperiod=self.talib_params[1])
+                elif func_name_upper in ['MACDFIX']:
+                    # MACDFIX: signalperiod
+                    result = talib_func(*inputs.values(), signalperiod=self.talib_params[0])
+                elif func_name_upper in ['MAMA']:
+                    # MAMA: fastlimit, slowlimit
+                    if len(self.talib_params) >= 2:
+                        result = talib_func(*inputs.values(), 
+                                          fastlimit=self.talib_params[0],
+                                          slowlimit=self.talib_params[1])
+                    else:
+                        result = talib_func(*inputs.values())
+                elif func_name_upper in ['MINUS_DM', 'PLUS_DM']:
+                    # MINUS_DM, PLUS_DM: high, low, timeperiod (位置参数)
+                    result = talib_func(*inputs.values(), self.talib_params[0])
+                elif func_name_upper in ['ADX', 'ADXR', 'DX', 'MINUS_DI', 'PLUS_DI']:
+                    # ADX系列: high, low, close, timeperiod (位置参数)
+                    result = talib_func(*inputs.values(), self.talib_params[0])
+                else:
+                    # 默认处理：单个参数作为 timeperiod
+                    if len(self.talib_params) == 1:
+                        result = talib_func(*inputs.values(), timeperiod=self.talib_params[0])
+                    else:
+                        # 多个参数，尝试位置参数传递
+                        all_args = list(inputs.values()) + self.talib_params
+                        result = talib_func(*all_args)
+            else:
+                # 无参数调用
+                result = talib_func(*inputs.values())
+            
+            # 处理返回值
+            if isinstance(result, tuple):
+                # 特殊处理某些返回多个值的函数
+                func_name_upper = self.talib_func_name.upper()
+                if func_name_upper.startswith('AROON') and len(result) == 2:
+                    # AROON 返回 (AROON_Up, AROON_Down)，我们使用 AROON_Up - AROON_Down 作为因子
+                    aroon_up, aroon_down = result
+                    result = aroon_up - aroon_down
+                elif func_name_upper.startswith('BBANDS') and len(result) == 3:
+                    # BBANDS 返回 (Upper, Middle, Lower)，我们使用 Middle Band 作为因子
+                    upper, middle, lower = result
+                    result = middle
+                elif func_name_upper == 'ACCBANDS' and len(result) == 3:
+                    # ACCBANDS 返回 (Upper, Middle, Lower)，我们使用 Middle Band 作为因子
+                    upper, middle, lower = result
+                    result = middle
+                elif func_name_upper in ['MACD', 'MACDEXT', 'MACDFIX'] and len(result) == 3:
+                    # MACD系列 返回 (MACD, Signal, Histogram)，我们使用 MACD - Signal 作为因子
+                    macd, signal, histogram = result
+                    result = macd - signal
+                elif func_name_upper in ['STOCH', 'STOCHF', 'STOCHRSI'] and len(result) == 2:
+                    # STOCH系列 返回 (K, D)，我们使用 K - D 作为因子
+                    k_value, d_value = result
+                    result = k_value - d_value
+                else:
+                    # 如果返回多个值，取第一个（通常是主要的指标值）
+                    result = result[0]
+            
+            # 转换为 pandas Series
+            factor_series = pd.Series(result, index=ohlcv_data.index)
+            
+            return factor_series
+            
+        except Exception as e:
+            print(f"TALIB 函数调用失败 {self.talib_func_name}: {e}")
+            return pd.Series(dtype=float)
 
 
 def _calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -433,8 +866,8 @@ def create_factor_calculator(
             return FileFactorCalculator(found_file, factor_name)
         # 如果目录中没找到，继续尝试其他方式
     
-    # 优先级3: 使用内置因子
-    if factor_name and factor_name in BuiltinFactorCalculator.BUILTIN_FACTORS:
+    # 优先级3: 使用内置因子（包括 TALIB 因子）
+    if factor_name and (factor_name in BuiltinFactorCalculator.BUILTIN_FACTORS or factor_name.startswith('TALIB_')):
         return BuiltinFactorCalculator(factor_name, data_loader)
     
     # 优先级4: 使用自定义函数

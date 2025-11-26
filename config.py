@@ -256,6 +256,52 @@ STRATEGY_PARAMS = {
                 "step": 1
             }
         }
+    },
+    "limit_up_gene": {
+        "name": "涨停基因策略",
+        "description": "基于历史涨停基因的股票轮动策略",
+        "parameters": {
+            "stock_num": {
+                "name": "股票数量",
+                "type": "int",
+                "default": 6,
+                "min": 1,
+                "max": 20,
+                "step": 1
+            },
+            "hold_days": {
+                "name": "持仓天数",
+                "type": "int",
+                "default": 5,
+                "min": 1,
+                "max": 30,
+                "step": 1
+            },
+            "up_price": {
+                "name": "股价上限",
+                "type": "int",
+                "default": 20,
+                "min": 5,
+                "max": 50,
+                "step": 1
+            },
+            "limit_days_window": {
+                "name": "涨停参考窗口",
+                "type": "int",
+                "default": 750,
+                "min": 250,
+                "max": 1000,
+                "step": 50
+            },
+            "init_stock_count": {
+                "name": "初始股票池数量",
+                "type": "int",
+                "default": 1000,
+                "min": 100,
+                "max": 2000,
+                "step": 100
+            }
+        }
     }
 }
 

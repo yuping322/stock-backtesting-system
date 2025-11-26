@@ -1,4 +1,3 @@
-
 # ===========================================================
 #  单因子 / 多因子 Alphalens 一键检验 + 自动打分脚本
 #  适用平台：JoinQuant / RiceQuant 等支持 JQData 的环境
@@ -17,6 +16,8 @@ import json
 import sys
 import os
 import time
+from typing import List, Optional
+from pathlib import Path
 
 # 添加父目录到路径，以便导入项目模块
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -447,9 +448,12 @@ class FactorTester:
         
         if self.cfg.STOCK_POOL == 'stock':
             # 获取A股所有股票代码
-            # 这里需要使用本地或其他数据源获取全市场股票列表
-            # 暂时使用空列表，需要根据实际情况实现
-            self.stocks = []
+            try:
+                self.stocks = data.get_index_stocks("small")
+                print(f'[get_stocks] 获取到A股股票 {len(self.stocks)} 只')
+            except Exception as e:
+                print(f'[get_stocks] 获取A股股票失败: {e}，使用空列表')
+                self.stocks = []
         else:
             # 获取指数成分股
             symbol = self.cfg.STOCK_POOL.split('.')[0]
@@ -796,33 +800,72 @@ class FactorTester:
             
             # 尝试从 OSS 读取因子
             else:
-                oss_start = time.time()
-                print(f'[OSS因子] 尝试从 OSS 读取因子: {factor_name} - {time.strftime("%H:%M:%S")}')
+                # 如果是 TALIB_ 开头的因子，直接跳到实时计算
+                if factor_name.startswith('TALIB_'):
+                    print(f'[TALIB因子] {factor_name} 直接使用实时计算 - {time.strftime("%H:%M:%S")}')
+                else:
+                    oss_start = time.time()
+                    print(f'[OSS因子] 尝试从 OSS 读取因子: {factor_name} - {time.strftime("%H:%M:%S")}')
+                    
+                    try:
+                        factor_series = data.factor_for_al(
+                            codes=self._get_stocks_for_calculation(),
+                            start_date=self.cfg.START,
+                            end_date=self.cfg.END,
+                            factor_name=factor_name
+                        )
+                        
+                        oss_elapsed = time.time() - oss_start
+                        print(f'[OSS因子] OSS读取完成 - 耗时: {oss_elapsed:.2f}秒')
+                        
+                        if factor_series is not None and len(factor_series) > 0:
+                            print(f'✓ 成功从 OSS 读取因子 {factor_name}，共 {len(factor_series)} 条数据')
+                            elapsed = time.time() - start_time
+                            print(f'[get_single_factor完成] OSS因子 {factor_name} - 耗时: {elapsed:.2f}秒')
+                            return factor_series
+                        else:
+                            print(f'⚠️  因子 {factor_name} 在 OSS 中无数据，尝试实时计算')
+                            
+                    except Exception as oss_e:
+                        print(f'❌ 从 OSS 读取因子 {factor_name} 失败: {oss_e}，尝试实时计算')
                 
+                # 尝试使用计算器计算因子（TALIB_ 开头的因子或 OSS 失败的情况）
                 try:
-                    factor_series = data.factor_for_al(
-                        codes=self._get_stocks_for_calculation(),
-                        start_date=self.cfg.START,
-                        end_date=self.cfg.END,
-                        factor_name=factor_name
-                    )
+                    from factor_calculator import create_factor_calculator
+                    calculator = create_factor_calculator(factor_name=factor_name)
                     
-                    oss_elapsed = time.time() - oss_start
-                    print(f'[OSS因子] OSS读取完成 - 耗时: {oss_elapsed:.2f}秒')
+                    factor_data = {}
+                    stocks = self._get_stocks_for_calculation()
+                    print(f'[计算因子] 开始计算 {factor_name}，股票数量: {len(stocks)}')
                     
-                    if factor_series is not None and len(factor_series) > 0:
-                        print(f'✓ 成功从 OSS 读取因子 {factor_name}，共 {len(factor_series)} 条数据')
+                    for i, stock in enumerate(stocks):
+                        stock_start = time.time()
+                        
+                        try:
+                            stock_series = calculator.calculate(stock, self.cfg.START, self.cfg.END)
+                            if stock_series is not None and len(stock_series) > 0:
+                                for date, val in stock_series.items():
+                                    factor_data[(pd.Timestamp(date), stock)] = val
+                            else:
+                                pass  # 静默跳过无数据股票
+                        except Exception as e:
+                            print(f'[计算因子] 股票 {stock} 计算失败: {e}')  # 只打印失败的
+                        
+                        stock_elapsed = time.time() - stock_start
+                    
+                    if factor_data:
+                        factor_series = pd.Series(factor_data)
+                        factor_series.index.names = ['date', 'asset']
                         elapsed = time.time() - start_time
-                        print(f'[get_single_factor完成] OSS因子 {factor_name} - 耗时: {elapsed:.2f}秒')
+                        print(f'[get_single_factor完成] 计算因子 {factor_name} - 耗时: {elapsed:.2f}秒')
                         return factor_series
                     else:
-                        print(f'⚠️  因子 {factor_name} 在 OSS 中无数据')
+                        print(f'⚠️  计算因子 {factor_name} 无有效数据')
                         return None
-                except Exception as e:
-                    oss_elapsed = time.time() - oss_start
-                    print(f'❌ 从 OSS 读取因子 {factor_name} 失败 - 耗时: {oss_elapsed:.2f}秒 - 错误：{e}')
+                        
+                except Exception as calc_e:
+                    print(f'❌ 计算因子 {factor_name} 失败: {calc_e}')
                     return None
-        
         except Exception as e:
             elapsed = time.time() - start_time
             print(f'[get_single_factor失败] 因子 {factor_name} 计算失败：{e} - 耗时: {elapsed:.2f}秒')
@@ -926,9 +969,25 @@ class FactorTester:
         factor_clean = factor_series.dropna()
         print(f'[步骤5] 清理前因子数据点: {len(factor_series)}, 清理后: {len(factor_clean)}')
         
+        # 检查有效数据比例
+        if len(factor_series) == 0:
+            print(f'⚠️  因子 {factor_name} 无任何数据')
+            return []
+        
+        valid_ratio = len(factor_clean) / len(factor_series)
+        print(f'[步骤5] 有效数据比例: {valid_ratio:.1%}')
+        
+        # 如果有效数据太少，可能是技术指标预热期问题
         if len(factor_clean) == 0:
             print(f'⚠️  因子 {factor_name} 清理后无有效数据')
+            print(f'   可能原因：技术指标需要预热期，当前数据长度不足')
+            print(f'   建议：增加历史数据长度或选择不同的因子')
             return []
+        
+        # 如果有效数据比例太低，给出警告但继续处理
+        if valid_ratio < 0.1:  # 少于10%的有效数据
+            print(f'⚠️  警告：因子 {factor_name} 有效数据比例仅为 {valid_ratio:.1%}')
+            print(f'   可能原因：技术指标预热期较长，建议检查数据时间范围')
         
         try:
             clean = al.utils.get_clean_factor_and_forward_returns(
@@ -937,7 +996,7 @@ class FactorTester:
                 groupby=self._industry,
                 quantiles=self.cfg.QUANTILES,
                 periods=self.cfg.PERIODS,
-                max_loss=3
+                max_loss=1.0  # 允许最多丢弃 100% 的数据
             )
             print(f'[步骤5完成] Alphalens清理耗时: {time.time() - step_start:.2f}秒')
         except Exception as e:
@@ -1048,10 +1107,8 @@ class FactorTester:
                     for fig_num in current_figs:
                         if fig_num not in saved_fig_nums:
                             try:
-                                fig = plt.figure(fig_num)
-                                fig.canvas.draw()
-                                saved_fig_objects[fig_num] = fig
-                                saved_fig_nums.add(fig_num)
+                                fig = saved_fig_objects[fig_num]
+                                fig.canvas.draw()  # 强制渲染
                             except:
                                 pass
                     
@@ -1099,6 +1156,11 @@ class FactorTester:
 
         # 对每个调仓周期分别打分
         for p in self.cfg.PERIODS:
+            # 检查 clean 数据格式，如果是失败时的元组格式，跳过打分
+            if isinstance(clean, tuple) and len(clean) == 3 and clean[1] is None and clean[2] is None:
+                print(f'⚠️  {factor_name} 周期{p}天 Alphalens清理失败，跳过打分')
+                continue
+            
             result = quick_score(factor_name, clean, p, self.cfg)
             
             # 检查是否返回了 None（数据不足或计算失败）
@@ -1150,6 +1212,444 @@ class FactorTester:
             results.append(result)
         
         return results
+
+
+def get_stock_list(stock_pool: str, max_stocks: Optional[int] = None) -> List[str]:
+    """
+    获取股票列表
+
+    Args:
+        stock_pool: 股票池标识
+        max_stocks: 最大股票数量
+
+    Returns:
+        股票代码列表
+    """
+    try:
+        if stock_pool == 'stock':
+            # 全市场股票 - 这里需要实现获取全市场股票的逻辑
+            # 暂时使用沪深300作为示例
+            stocks = data.get_index_stocks('000300')
+        elif stock_pool == 'small':
+            # 小盘股（市值较小的股票）
+            # 暂时使用中证500作为小盘股代表
+            stocks = data.get_index_stocks('000905')[:500] if len(data.get_index_stocks('000905')) > 500 else data.get_index_stocks('000905')
+        else:
+            # 指数成分股
+            stocks = data.get_index_stocks(stock_pool)
+
+        if max_stocks and len(stocks) > max_stocks:
+            stocks = stocks[:max_stocks]
+
+        print(f"获取到 {len(stocks)} 只股票")
+        return stocks
+
+    except Exception as e:
+        print(f"获取股票列表失败: {e}")
+        return []
+
+
+def generate_single_factor(factor_name: str, stock_codes: List[str],
+                          start_date: str, end_date: str,
+                          factor_file: Optional[str] = None,
+                          factor_dir: Optional[str] = None) -> pd.DataFrame:
+    """
+    生成单个因子的数据
+
+    Args:
+        factor_name: 因子名称
+        stock_codes: 股票代码列表
+        start_date: 开始日期
+        end_date: 结束日期
+        factor_file: 因子文件路径
+        factor_dir: 因子文件目录
+
+    Returns:
+        包含因子数据的DataFrame (date, code, factor_value)
+    """
+    print(f"\n开始生成因子: {factor_name}")
+
+    # 创建因子计算器
+    try:
+        if factor_file and factor_name:
+            # 从文件加载因子
+            calc = create_factor_calculator(
+                file_path=factor_file,
+                factor_name=factor_name
+            )
+        elif factor_dir and factor_name:
+            # 从目录查找因子文件
+            calc = create_factor_calculator(
+                factor_name=factor_name,
+                factor_dir=factor_dir
+            )
+        else:
+            # 使用内置因子
+            calc = create_factor_calculator(factor_name=factor_name)
+
+        print(f"✓ 创建因子计算器成功: {type(calc).__name__}")
+
+    except Exception as e:
+        print(f"❌ 创建因子计算器失败: {e}")
+        return pd.DataFrame()
+
+    # 为每只股票计算因子
+    all_factor_data = []
+
+    for i, stock_code in enumerate(stock_codes):
+        if (i + 1) % 50 == 0:
+            print(f"  处理进度: {i+1}/{len(stock_codes)} 股票")
+
+        try:
+            # 计算因子值
+            factor_series = calc.calculate(stock_code, start_date, end_date)
+
+            if not factor_series.empty:
+                # 删除NaN值，只保留有效的数据点
+                factor_series = factor_series.dropna()
+
+                if not factor_series.empty:
+                    # 转换为标准格式
+                    stock_data = pd.DataFrame({
+                        'date': factor_series.index,
+                        'code': str(stock_code).zfill(6),  # 标准化为6位数字
+                        'factor_value': factor_series.values
+                    })
+                    # 确保code列是字符串类型
+                    stock_data['code'] = stock_data['code'].astype(str)
+                    all_factor_data.append(stock_data)
+
+        except Exception as e:
+            print(f"  ⚠️  计算股票 {stock_code} 因子失败: {e}")
+            continue
+
+    # 合并所有股票的数据
+    if all_factor_data:
+        result_df = pd.concat(all_factor_data, ignore_index=True)
+
+        # 排序并重置索引
+        result_df = result_df.sort_values(['date', 'code']).reset_index(drop=True)
+
+        print(f"✓ 因子 {factor_name} 生成完成，共 {len(result_df)} 条记录")
+        return result_df
+    else:
+        print(f"❌ 因子 {factor_name} 生成失败，无有效数据")
+        return pd.DataFrame()
+
+
+def save_factor_data(factor_name: str, factor_data: pd.DataFrame,
+                    output_dir: str, start_date: str, end_date: str,
+                    overwrite: bool = False) -> bool:
+    """
+    保存因子数据到文件
+
+    Args:
+        factor_name: 因子名称
+        factor_data: 因子数据DataFrame
+        output_dir: 输出目录
+        overwrite: 是否覆盖现有文件
+
+    Returns:
+        保存是否成功
+    """
+    if factor_data.empty:
+        print(f"⚠️  因子 {factor_name} 数据为空，跳过保存")
+        return False
+
+    # 创建输出目录
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # 生成文件名
+    filename = f"{factor_name}_{start_date}_{end_date}.csv"
+    filepath = output_path / filename
+
+    # 检查文件是否已存在
+    if filepath.exists() and not overwrite:
+        print(f"⚠️  文件已存在: {filepath}，使用 --overwrite 覆盖")
+        return False
+
+    try:
+        # 保存为CSV
+        factor_data.to_csv(filepath, index=False, float_format='%.6f')
+
+        # 显示统计信息
+        print(f"✓ 因子 {factor_name} 已保存: {filepath}")
+        print(f"  数据量: {len(factor_data)} 条记录")
+        print(f"  股票数: {factor_data['code'].nunique()}")
+        print(f"  日期范围: {factor_data['date'].min()} ~ {factor_data['date'].max()}")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ 保存因子 {factor_name} 失败: {e}")
+        return False
+
+
+def export_data(
+    codes: List[str],
+    factors: List[str],
+    start_date: str,
+    end_date: str,
+    output_dir: str,
+    stock_pool: str = 'stock',
+    max_stocks: Optional[int] = None,
+    factor_file: Optional[str] = None,
+    factor_dir: Optional[str] = None,
+    overwrite: bool = False
+) -> str:
+    """
+    导出因子数据，使用generate_factors.py的实现
+
+    Args:
+        codes: 股票代码列表（如果为空，使用stock_pool获取）
+        factors: 因子名称列表
+        start_date: 开始日期 'YYYY-MM-DD'
+        end_date: 结束日期 'YYYY-MM-DD'
+        output_dir: 输出目录
+        stock_pool: 股票池类型，默认 'stock'
+        max_stocks: 最大股票数量限制
+        factor_file: 因子文件路径
+        factor_dir: 因子文件目录
+        overwrite: 是否覆盖现有文件
+
+    Returns:
+        str: 输出文件路径
+    """
+    import os
+    from datetime import datetime
+    from pathlib import Path
+    from pathlib import Path
+
+    print(f"\n{'='*60}")
+    print(f"导出因子数据")
+    print(f"{'='*60}")
+    print(f"股票池: {stock_pool}")
+    print(f"股票数量: {len(codes) if codes else '自动获取'}")
+    print(f"因子列表: {factors}")
+    print(f"日期范围: {start_date} ~ {end_date}")
+    print(f"输出目录: {output_dir}")
+    print(f"{'='*60}\n")
+
+    # 获取股票列表
+    if not codes:
+        codes = get_stock_list(stock_pool, max_stocks)
+        if not codes:
+            print("❌ 无法获取股票列表")
+            return None
+
+    # 为技术指标计算扩展时间范围（向前推3个月以确保有足够数据）
+    import pandas as pd
+    extended_start = pd.to_datetime(start_date) - pd.DateOffset(months=3)
+    extended_start_str = extended_start.strftime('%Y-%m-%d')
+    print(f"为技术指标计算扩展时间范围: {extended_start_str} ~ {end_date} (原始: {start_date} ~ {end_date})")
+
+    # 生成因子数据
+    factor_results = []
+
+    for factor_name in factors:
+        try:
+            # 生成单个因子数据
+            factor_data = generate_single_factor(
+                factor_name=factor_name,
+                stock_codes=codes,
+                start_date=extended_start_str,  # 使用扩展的时间范围
+                end_date=end_date,
+                factor_file=factor_file if factor_name == factors[0] else None,  # 只对第一个因子使用文件
+                factor_dir=factor_dir
+            )
+
+            # 保存因子数据
+            success = save_factor_data(
+                factor_name=factor_name,
+                factor_data=factor_data,
+                output_dir=output_dir,
+                start_date=start_date,
+                end_date=end_date,
+                overwrite=overwrite
+            )
+
+            factor_results.append({
+                'factor_name': factor_name,
+                'success': success,
+                'records': len(factor_data) if success else 0
+            })
+
+        except Exception as e:
+            print(f"❌ 生成因子 {factor_name} 时发生错误: {e}")
+            factor_results.append({
+                'factor_name': factor_name,
+                'success': False,
+                'records': 0
+            })
+
+    # 统计结果
+    successful_count = sum(1 for r in factor_results if r['success'])
+    total_records = sum(r['records'] for r in factor_results)
+
+    print(f"\n✓ 导出完成: {successful_count}/{len(factors)} 个因子成功")
+    print(f"  总数据量: {total_records} 条记录")
+    print(f"  输出目录: {output_dir}")
+
+    return output_dir
+
+
+def export_formatted_csv(
+    codes: List[str],
+    start_date: str,
+    end_date: str,
+    output_dir: str,
+    factors: List[str] = None,   # 新：允许指定因子子集，None或[]时为全量
+    industry_default: str = "Unknown"
+) -> str:
+    """
+    只导出基础行情+原生OSS因子字段：
+    date, stock, open, high, low, close, volume, amount, mkt_cap, industry, <全量或指定因子>
+    不做任何派生/二次计算。
+    """
+    print(f"\n{'='*60}")
+    print(f"导出原始行情+原生因子字段数据...")
+    print(f"股票数量: {len(codes)}  日期: {start_date} ~ {end_date}")
+    print(f"因子名: {'ALL' if not factors else factors}")
+    print(f"{'='*60}\n")
+
+    # --------- 行情部分 ---------
+    # 为价格数据也使用扩展时间范围（与因子计算一致）
+    extended_start = pd.to_datetime(start_date) - pd.DateOffset(months=3)
+    extended_start_str = extended_start.strftime('%Y-%m-%d')
+    
+    price_dict = data.load_oss_complex_stocks(
+        codes=codes,
+        start=extended_start_str,  # 使用扩展时间范围
+        end=end_date,
+        fields="all"
+    )
+    if not price_dict:
+        print("⚠️  未读取到任何行情数据")
+        return None
+
+    # 合并行情长表
+    merged = None
+    for fname, fdf in price_dict.items():
+        long_df = fdf.reset_index().melt(
+            id_vars='date', var_name='stock', value_name=fname
+        )
+        if merged is None:
+            merged = long_df
+        else:
+            merged = merged.merge(long_df, on=['date', 'stock'], how='outer')
+    if merged is None or merged.empty:
+        print("⚠️  合并行情数据为空")
+        return None
+    merged = merged.sort_values(['stock', 'date']).reset_index(drop=True)
+    # 简单市值计算
+    if 'close' in merged.columns and 'outstanding_share' in merged.columns:
+        merged['mkt_cap'] = merged['close'] * merged['outstanding_share']
+    else:
+        merged['mkt_cap'] = pd.NA
+    # 行业与概念填充
+    try:
+        code_list = merged['stock'].dropna().astype(str).unique().tolist()
+        ind_map = data.get_industry_category(code_list) if code_list else {}
+        cpt_map = data.get_concept_categories(code_list) if code_list else {}
+    except Exception:
+        ind_map, cpt_map = {}, {}
+
+    def _code_industry(c: str) -> str:
+        if isinstance(ind_map, dict):
+            return ind_map.get(c) or industry_default
+        return industry_default
+
+    def _code_concepts(c: str) -> str:
+        vals = []
+        if isinstance(cpt_map, dict):
+            vals = cpt_map.get(c) or []
+        return ','.join([str(v) for v in vals if v]) if vals else ''
+
+    merged['industry'] = merged['stock'].astype(str).map(_code_industry)
+    merged['concepts'] = merged['stock'].astype(str).map(_code_concepts)
+
+    # --------- 因子部分 ---------
+    df_factors = None
+    if factors and len(factors) > 0:
+        # 从已导出的因子文件中读取数据
+        factor_frames = []
+        all_stock_codes = set()  # 收集所有股票代码
+        
+        for factor_name in factors:
+            factor_file = os.path.join(output_dir, f"{factor_name}_{start_date}_{end_date}.csv")
+            if os.path.exists(factor_file):
+                try:
+                    df = pd.read_csv(factor_file, dtype={'code': str})
+                    df['date'] = pd.to_datetime(df['date'])
+                    # 收集股票代码
+                    all_stock_codes.update(df['code'].dropna().unique())
+                    # 重命名列以匹配期望的格式
+                    df = df.rename(columns={'code': 'stock', 'factor_value': factor_name})
+                    # 只保留需要的列
+                    df = df[['date', 'stock', factor_name]]
+                    factor_frames.append(df)
+                except Exception as e:
+                    print(f"⚠️  读取因子文件 {factor_file} 失败: {e}")
+                    continue
+        
+        if factor_frames:
+            # 合并所有因子数据
+            df_factors = factor_frames[0]
+            for df in factor_frames[1:]:
+                df_factors = df_factors.merge(df, on=['date', 'stock'], how='outer')
+            
+            # 设置MultiIndex
+            df_factors = df_factors.set_index(['date', 'stock'])
+            
+            # 更新codes为所有因子相关的股票
+            codes = list(all_stock_codes)
+    
+    if df_factors is not None and not df_factors.empty:
+        # df_factors: MultiIndex(date, code)
+        df_factors = df_factors.reset_index()
+        # 'code'字段源码取名与行情对齐
+        df_factors.rename(columns={"code":"stock"}, inplace=True)
+        # 统一两侧股票代码格式为6位数字，避免后缀/前缀不一致导致合并失败
+        def _to_six_digit(s: pd.Series) -> pd.Series:
+            s = s.astype(str).str.upper()
+            s = (s.str.replace('.XSHG','', regex=False)
+                   .str.replace('.XSHE','', regex=False)
+                   .str.replace('.XBJ','', regex=False))
+            extracted = s.str.extract(r'(\d{6})')[0]
+            s = extracted.where(extracted.notna(), s)
+            return s
+        
+        merged['stock'] = _to_six_digit(merged['stock'])
+        if df_factors is not None:
+            # 重新标准化因子数据的股票代码
+            df_factors_reset = df_factors.reset_index()
+            df_factors_reset['stock'] = _to_six_digit(df_factors_reset['stock'])
+            df_factors = df_factors_reset.set_index(['date', 'stock'])
+        merged = merged.merge(df_factors, on=["date","stock"], how="outer")
+        # 确保基础字段和所有原生因子顺序
+        base_cols = ['date', 'stock', 'open', 'high', 'low', 'close', 'volume', 'amount', 'mkt_cap', 'industry', 'concepts']
+        factor_cols = [c for c in df_factors.columns if c not in base_cols and c not in ('date','stock')]
+        # 若指定factors有顺序则保持，否则用读取到的原始顺序
+        if factors and len(factors)>0:
+            factor_cols = [c for c in factors if c in factor_cols]
+        final_cols = base_cols + factor_cols
+    else:
+        print("⚠️  无任何因子可导出，仅输出基础行情字段")
+        base_cols = ['date', 'stock', 'open', 'high', 'low', 'close', 'volume', 'amount', 'mkt_cap', 'industry']
+        final_cols = base_cols
+    # 补空
+    for c in final_cols:
+        if c not in merged.columns:
+            merged[c] = pd.NA
+    out_df = merged[final_cols].sort_values(['date','stock']).reset_index(drop=True)
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, 'formatted_data.csv')
+    out_df.to_csv(output_file, index=False, encoding='utf-8-sig')
+    print(f"\n✓ 原始宽表已导出: {output_file}")
+    print(f"  行数: {len(out_df)}  股票: {out_df['stock'].nunique()}  日期: {out_df['date'].min()} ~ {out_df['date'].max()}")
+    print(f"  导出因子: {factor_cols if df_factors is not None and not df_factors.empty else '无'}")
+    return output_file
 
 
 # -----------------------------------------------------------

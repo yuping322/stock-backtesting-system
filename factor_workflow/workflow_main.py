@@ -42,7 +42,10 @@ def _save_suite_outputs(tag: str, suite_result):
 
 
 def train_long_short(provider_uri="~/.qlib/qlib_data", region="cn"):
-    qlib.init(provider_uri=provider_uri, region=region)
+    try:
+        qlib.init(provider_uri=provider_uri, region=region)
+    except Exception as e:
+        print(f"QLib already initialized or initialization skipped: {e}")
 
     long_dataset = init_instance_by_config(long_dataset_config)
     short_dataset = init_instance_by_config(short_dataset_config)

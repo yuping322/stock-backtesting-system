@@ -32,7 +32,18 @@ bash scripts/run_all_factors.sh
 - 日期范围: 2025-07-26 ~ 2025-10-24
 - 输出目录: `results/factor_test_all_oss/`
 
-### 2. 测试前10个因子
+### 2. 测试所有 TA-Lib 技术指标因子
+
+```bash
+bash scripts/run_all_talib_factors.sh
+```
+
+- 测试 `talib_factors.txt` 中的所有 216 个 TA-Lib 技术指标因子
+- 日期范围: 2025-07-26 ~ 2025-10-24
+- 输出目录: `results/factor_test_all_talib/`
+- 需要先确保 TA-Lib 已安装且 `talib_factors.txt` 存在
+
+### 3. 测试前10个因子
 
 ```bash
 bash scripts/run_first10_factors.sh
@@ -75,17 +86,22 @@ bash scripts/run_failed_factors.sh
    bash scripts/run_all_factors.sh
    ```
 
-2. **如果中断，继续运行**
+2. **测试 TA-Lib 技术指标因子**
+   ```bash
+   bash scripts/run_all_talib_factors.sh
+   ```
+
+3. **如果中断，继续运行**
    ```bash
    bash scripts/run_remaining_factors.sh
    ```
 
-3. **生成汇总报告**
+4. **生成汇总报告**
    ```bash
    bash scripts/generate_summary_readme.sh
    ```
 
-4. **查看结果**
+5. **查看结果**
    ```bash
    cat results/ALL_RESULTS_SUMMARY.md
    ```
