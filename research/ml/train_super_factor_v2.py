@@ -36,8 +36,9 @@ pd.set_option('display.max_columns', 200)
 pd.set_option('display.width', 200)
 
 # 添加项目路径
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, 'src'))
 
 import data
 

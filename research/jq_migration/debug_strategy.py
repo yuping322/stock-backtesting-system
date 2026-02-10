@@ -12,9 +12,10 @@ from pathlib import Path
 # 添加项目根目录到路径
 project_root = str(Path(__file__).parent.parent.parent)
 sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, 'src'))
 
 import data as data_module
-from src.factor_old.factor import FactorTester, CFG
+from factor_old.factor import FactorTester, CFG
 
 # 选择一个特定日期进行详细调试
 DEBUG_DATE = '2025-11-02'
