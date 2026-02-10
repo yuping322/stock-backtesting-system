@@ -1,0 +1,255 @@
+# Skill 定义：FactorGenerationAndEvaluation_v1
+
+## 1. Skill 目标（Goal）
+
+构建一个**可重复、可评估、可进化**的因子生成与评估流程，用于系统性发现、验证和淘汰股票因子。
+
+该 Skill 不关心具体模型或策略，只关心：
+
+* 因子是否 **有效**
+* 因子是否 **稳定**
+* 因子是否 **值得进入因子池**
+
+---
+
+## 2. Skill 定位与边界
+
+### 本 Skill 负责：
+
+* 因子生成（基于规则 / 组合 / 变换）
+* 因子评估（IC / 分层收益 / 稳定性）
+* 因子筛选与分级
+* 因子结果沉淀
+
+### 本 Skill 不负责：
+
+* 组合构建
+* 仓位管理
+* 交易执行
+* 收益最大化
+
+> 本 Skill 的输出是 **“因子资产”**，而不是交易策略。
+
+---
+
+## 3. 输入（Inputs）
+
+### 3.1 数据输入（由 Tool 提供）
+
+* 股票行情数据（AkShare）
+
+  * open / high / low / close / volume
+* 基础财务数据（AkShare）
+* 交易日历
+
+### 3.2 配置输入（Skill 参数）
+
+```yaml
+universe:
+  market: A-share
+  filters:
+    - not_st
+    - not_suspended
+    - market_cap > threshold
+
+time_range:
+  start: YYYY-MM-DD
+  end: YYYY-MM-DD
+
+forward_returns:
+  - 5D
+  - 10D
+  - 20D
+
+factor_generation_rules:
+  source_factors:
+    - close
+    - volume
+    - turnover
+  operators:
+    - diff
+    - rolling_mean
+    - rolling_std
+    - rank
+    - zscore
+  windows:
+    - 5
+    - 10
+    - 20
+```
+
+---
+
+## 4. 核心流程（不可变主流程）
+
+> 以下流程顺序 **不可被 Tool 修改**
+
+### Step 1：数据准备
+
+* 对齐交易日
+* 股票池过滤
+* 缺失值处理
+* 异常值初筛
+
+输出：`clean_market_data`
+
+---
+
+### Step 2：因子生成
+
+基于规则组合生成候选因子：
+
+```text
+factor = operator(source_factor, window)
+```
+
+例如：
+
+* `diff(close, 5)`
+* `rolling_mean(volume, 20)`
+* `rank(turnover, 10)`
+
+输出：`raw_factor_set`
+
+---
+
+### Step 3：因子预处理
+
+对每个因子执行：
+
+* 去极值（winsorize）
+* 标准化（z-score）
+* 行业 / 市值中性化（可选）
+
+输出：`processed_factor_set`
+
+---
+
+### Step 4：因子评估（核心评估层）
+
+使用 **alphalens-reloaded** 对每个因子进行评估：
+
+评估维度包括：
+
+* IC / Rank IC
+* IC 时间序列稳定性
+* 分层收益（Quantile Returns）
+* Turnover
+* 最大回撤（分层）
+
+输出：`factor_metrics`
+
+---
+
+### Step 5：因子打分与筛选
+
+基于 Evaluator 规则，对因子进行打分：
+
+```text
+score = w1 * IC_mean
+      + w2 * ICIR
+      + w3 * stability
+      - w4 * turnover
+```
+
+并划分等级：
+
+* A：核心因子
+* B：可用因子
+* C：观察因子
+* D：淘汰
+
+输出：`factor_ranking`
+
+---
+
+### Step 6：结果沉淀（记忆层）
+
+对每个因子记录：
+
+* 生成规则
+* 参数
+* 评估指标
+* 淘汰 / 保留原因
+
+输出：`factor_archive`
+
+---
+
+## 5. 输出（Outputs）
+
+### 5.1 结构化输出
+
+```json
+{
+  "factor_name": "rank_diff_close_5",
+  "level": "A",
+  "metrics": {
+    "IC_mean": 0.045,
+    "ICIR": 0.62,
+    "turnover": 0.38
+  },
+  "decision": "keep"
+}
+```
+
+### 5.2 持久化输出
+
+* 因子仓库（Factor Pool）
+* 实验记录（Experiment Log）
+* 评估图表（alphalens 输出）
+
+---
+
+## 6. Tool 依赖清单（能力声明，不是实现）
+
+| 能力     | Tool 名称（建议）                   |
+| ------ | ----------------------------- |
+| 获取行情数据 | `load_market_data()`          |
+| 获取财务数据 | `load_fundamental_data()`     |
+| 因子生成   | `generate_factor()`           |
+| 因子预处理  | `preprocess_factor()`         |
+| 因子评估   | `evaluate_factor_alphalens()` |
+| 因子打分   | `score_factor()`              |
+| 结果存储   | `save_factor_result()`        |
+
+> Tool 可以不断演进，但接口语义保持稳定
+
+---
+
+## 7. 评估规则（Evaluator 草案）
+
+```yaml
+rules:
+  - if IC_mean < 0.02: reject
+  - if ICIR < 0.3: reject
+  - if stability_score < 0.5: downgrade
+  - if turnover > 0.6: penalty
+```
+
+---
+
+## 8. Skill 演化策略
+
+### 允许演化的部分：
+
+* 因子生成规则集合
+* 评估权重
+* Tool 实现方式
+
+### 不允许演化的部分：
+
+* 主流程顺序
+* 因子评估维度
+* 因子资产化思想
+
+---
+
+## 9. 下一步（明确行动项）
+
+1. 基于该 Skill 生成 **最小 Tool 集合**
+2. 跑通一次完整流程（哪怕只有 3 个因子）
+3. 引入 Evaluator 自动反馈
+4. 开始 Tool 级别的迭代
+
+> 从这一刻开始，你是在 **积累“可复利的方法论资产”**

@@ -25,11 +25,11 @@
 ## 📊 详细统计
 
 ### 修改的文件
-1. `backtest_engine.py` - 回测引擎核心
+1. `src/backtest/backtest_engine.py` - 回测引擎核心
 2. `app.py` - Streamlit应用
 3. `integrated_backtesting_system.py` - 集成系统
-4. `data_akshare.py` - AKShare模块修复
-5. `data.py` - 类型注解修复
+4. `src/data/data_akshare.py` - AKShare模块修复
+5. `src/data/data.py` - 类型注解修复
 
 ### 测试结果
 ```
@@ -99,21 +99,21 @@ from data_akshare import load_oss_stocks, get_balance
 ```python
 # 修改
 - from data import get_trading_dates, load_bt_stocks, get_index_daily, code2name
-+ from data_akshare import get_trading_dates, load_bt_stocks, get_index_daily, code2name
++ from src.data.data_akshare import get_trading_dates, load_bt_stocks, get_index_daily, code2name
 ```
 
 ### app.py
 ```python
 # 修改
 - from data import code2name
-+ from data_akshare import code2name
++ from src.data.data_akshare import code2name
 ```
 
 ### integrated_backtesting_system.py
 ```python
 # 修改
 - from data import get_trading_dates, load_bt_stocks, get_valuation, get_index_daily,code2name
-+ from data_akshare import get_trading_dates, load_bt_stocks, get_valuation, get_index_daily,code2name
++ from src.data.data_akshare import get_trading_dates, load_bt_stocks, get_valuation, get_index_daily,code2name
 ```
 
 ### data_akshare.py

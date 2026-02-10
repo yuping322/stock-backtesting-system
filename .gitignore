@@ -25,7 +25,6 @@ akshare_cache/
 stock_cache/
 
 # 数据文件
-data/
 all_a_stocks.csv
 monitor.csv
 
@@ -58,6 +57,8 @@ alpha_test/mlruns/
 factors/
 factors_test/
 exported_data_all/
+data/
+tests/data/
 
 # Qlib测试数据
 alpha_test/mini_data/
